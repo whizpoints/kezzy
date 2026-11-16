@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { initDb, runMigrations, getDb } from './db.js';
 import { createHealthServer } from './server.js';
 import { initTelegramBot } from './telegram.js';
-import { initWhatsApp, getWaSocket, getWaStatus, relinkWhatsApp } from './whatsapp.js';
+import { initWhatsApp, getWaSocket, getWaStatus, relinkWhatsApp, getLatestQr } from './whatsapp.js';
 
 // Prevent transient network errors or unhandled rejections from crashing the process
 process.on('unhandledRejection', (reason) => {
@@ -44,10 +44,13 @@ async function main() {
   }
 
   // 1. Start Health & Decoy Blog Server Immediately (Render Web Service requirement)
-  createHealthServer(() => ({
-    waConnected: getWaStatus().connected,
-    user: getWaStatus().userJid
-  }));
+  createHealthServer(
+    () => ({
+      waConnected: getWaStatus().connected,
+      user: getWaStatus().userJid
+    }),
+    getLatestQr
+  );
 
   // 2. Initialize Turso Edge SQLite Database & run migrations
   console.log('📦 Connecting to Turso database at:', dbUrl);

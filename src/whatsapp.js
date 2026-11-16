@@ -7,6 +7,7 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import NodeCache from 'node-cache';
 import { useTursoAuthState } from './tursoAuth.js';
+import { retryTelegramCall } from './telegram.js';
 import {
   getMappingByWaId,
   saveMapping,
@@ -26,11 +27,26 @@ import { sanitizeTopicName, downloadWaMedia, getProfilePictureBuffer } from './m
 let sockInstance = null;
 let activeAuthCleanup = null;
 let hasAnnouncedConnected = false;
+let latestQrString = null;
+let latestQrBuffer = null;
+let isInitializingWa = false;
+let isRelinkingWa = false;
+let lastRelinkTime = 0;
+
 let connectionStatus = {
   connected: false,
   userJid: null,
   qrMessageId: null
 };
+
+export function getLatestQr() {
+  return {
+    qrString: latestQrString,
+    qrBuffer: latestQrBuffer,
+    connected: connectionStatus.connected,
+    userJid: connectionStatus.userJid
+  };
+}
 
 // Caches for retry counter, raw proto messages, and echo suppression
 const msgRetryCounterCache = new NodeCache();
@@ -418,98 +434,145 @@ export async function initWhatsApp({
   groupId,
   generalTopicId = 1
 }) {
-  // Ensure previous socket is cleanly terminated before creating a new one
-  if (sockInstance) {
-    console.log('Cleaning up existing socket instance before re-initializing...');
-    try {
-      sockInstance.ev.removeAllListeners();
-      sockInstance.end();
-    } catch (_) {}
-    sockInstance = null;
+  if (isInitializingWa) {
+    console.log('⚠️ WhatsApp initialization is already in progress, skipping duplicate call.');
+    return sockInstance;
   }
+  isInitializingWa = true;
 
-  if (activeAuthCleanup) {
-    try {
-      activeAuthCleanup();
-    } catch (_) {}
-    activeAuthCleanup = null;
-  }
-
-  const { state, saveCreds, cleanup } = await useTursoAuthState(client, sessionId);
-  activeAuthCleanup = cleanup;
-
-  let version = [2, 3000, 1043857760];
   try {
-    const versionPromise = fetchLatestBaileysVersion();
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000));
-    const res = await Promise.race([versionPromise, timeoutPromise]);
-    if (res?.version) version = res.version;
-  } catch (_) {
-    console.log('⚡ Using stable fallback Baileys version');
-  }
-
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    browser: Browsers.macOS('Desktop'),
-    msgRetryCounterCache,
-    getMessage: async (key) => {
-      const cached = rawMessageCache.get(key.id);
-      if (cached) return cached;
-      return undefined;
-    },
-    syncFullHistory: false,
-    shouldSyncHistoryMessage: () => true,
-    defaultQueryTimeoutMs: 60000
-  });
-
-  sockInstance = sock;
-
-  // Listen for creds updates
-  sock.ev.on('creds.update', saveCreds);
-
-  // Connection events (QR, Connected, Disconnected)
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    // Handle QR code generation for linking
-    if (qr) {
-      console.log('⚡ New WhatsApp QR Code generated');
+    // Ensure previous socket is cleanly terminated before creating a new one
+    if (sockInstance) {
+      console.log('Cleaning up existing socket instance before re-initializing...');
       try {
-        const qrBuffer = await QRCode.toBuffer(qr, { width: 400, margin: 2 });
+        sockInstance.ev.removeAllListeners();
+        sockInstance.end();
+      } catch (_) {}
+      sockInstance = null;
+    }
+
+    if (activeAuthCleanup) {
+      try {
+        activeAuthCleanup();
+      } catch (_) {}
+      activeAuthCleanup = null;
+    }
+
+    const { state, saveCreds, cleanup } = await useTursoAuthState(client, sessionId);
+    activeAuthCleanup = cleanup;
+
+    let version = [2, 3000, 1043857760];
+    try {
+      const versionPromise = fetchLatestBaileysVersion();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000));
+      const res = await Promise.race([versionPromise, timeoutPromise]);
+      if (res?.version) version = res.version;
+    } catch (_) {
+      console.log('⚡ Using stable fallback Baileys version');
+    }
+
+    const sock = makeWASocket({
+      version,
+      auth: state,
+      logger: pino({ level: 'silent' }),
+      browser: Browsers.macOS('Desktop'),
+      msgRetryCounterCache,
+      getMessage: async (key) => {
+        const cached = rawMessageCache.get(key.id);
+        if (cached) return cached;
+        return undefined;
+      },
+      syncFullHistory: false,
+      shouldSyncHistoryMessage: () => true,
+      defaultQueryTimeoutMs: 60000
+    });
+
+    sockInstance = sock;
+
+    // Listen for creds updates
+    sock.ev.on('creds.update', saveCreds);
+
+    // Connection events (QR, Connected, Disconnected)
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      // Handle QR code generation for linking
+      if (qr) {
+        console.log('⚡ New WhatsApp QR Code generated');
+        latestQrString = qr;
+
+        try {
+          const qrBuffer = await QRCode.toBuffer(qr, { width: 400, margin: 2 });
+          latestQrBuffer = qrBuffer;
+
+          // Render ASCII QR in terminal / console for instant scan
+          try {
+            const terminalQr = await QRCode.toString(qr, { type: 'terminal', small: true });
+            console.log('\n' + terminalQr);
+            console.log('📱 Scan the QR code above or view at /qr to link WhatsApp.\n');
+          } catch (_) {}
+
+          const captionText = '📱 <b>Link WhatsApp:</b>\nScan this QR code in <b>WhatsApp > Linked Devices</b> to start the bridge with full history sync.';
+
+          // If we already sent a QR photo, edit it in-place using editMessageMedia to avoid socket hang ups & spam
+          if (connectionStatus.qrMessageId) {
+            try {
+              await retryTelegramCall(async () => {
+                await bot.telegram.editMessageMedia(
+                  groupId,
+                  connectionStatus.qrMessageId,
+                  undefined,
+                  {
+                    type: 'photo',
+                    media: { source: qrBuffer, filename: 'qr.png' },
+                    caption: captionText,
+                    parse_mode: 'HTML'
+                  }
+                );
+              }, 3, 1000);
+              return;
+            } catch (editErr) {
+              console.warn('Could not edit existing QR message, sending a fresh one:', editErr.message);
+              try {
+                await bot.telegram.deleteMessage(groupId, connectionStatus.qrMessageId).catch(() => {});
+              } catch (_) {}
+              connectionStatus.qrMessageId = null;
+            }
+          }
+
+          // Send fresh photo with retry
+          const sent = await retryTelegramCall(async () => {
+            return await bot.telegram.sendPhoto(
+              groupId,
+              { source: qrBuffer, filename: 'qr.png' },
+              getTopicExtra(generalTopicId, {
+                caption: captionText,
+                parse_mode: 'HTML'
+              })
+            );
+          }, 3, 1000);
+
+          if (sent?.message_id) {
+            connectionStatus.qrMessageId = sent.message_id;
+          }
+        } catch (err) {
+          console.error('Failed to send QR to Telegram after retries:', err.message);
+        }
+      }
+
+      if (connection === 'open') {
+        connectionStatus.connected = true;
+        connectionStatus.userJid = sock.user.id;
+        latestQrString = null;
+        latestQrBuffer = null;
+        console.log('✅ WhatsApp connection opened successfully as:', sock.user.id);
 
         if (connectionStatus.qrMessageId) {
           try {
             await bot.telegram.deleteMessage(groupId, connectionStatus.qrMessageId);
+            connectionStatus.qrMessageId = null;
           } catch (_) {}
         }
-
-        const sent = await bot.telegram.sendPhoto(
-          groupId,
-          { source: qrBuffer },
-          getTopicExtra(generalTopicId, {
-            caption: '📱 <b>Link WhatsApp:</b>\nScan this QR code in <b>WhatsApp > Linked Devices</b> to start the bridge with full history sync.',
-            parse_mode: 'HTML'
-          })
-        );
-        connectionStatus.qrMessageId = sent.message_id;
-      } catch (err) {
-        console.error('Failed to send QR to Telegram:', err.message);
-      }
-    }
-
-    if (connection === 'open') {
-      connectionStatus.connected = true;
-      connectionStatus.userJid = sock.user.id;
-      console.log('✅ WhatsApp connection opened successfully as:', sock.user.id);
-
-      if (connectionStatus.qrMessageId) {
-        try {
-          await bot.telegram.deleteMessage(groupId, connectionStatus.qrMessageId);
-          connectionStatus.qrMessageId = null;
-        } catch (_) {}
-      }
 
 let lastAnnounceTime = 0;
 
@@ -1543,6 +1606,9 @@ let lastAnnounceTime = 0;
   });
 
   return sock;
+  } finally {
+    isInitializingWa = false;
+  }
 }
 
 function escapeHtml(text) {
@@ -1554,10 +1620,20 @@ function escapeHtml(text) {
 }
 
 export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bot, groupId, generalTopicId = 1 }) {
+  const now = Date.now();
+  if (isRelinkingWa || (now - lastRelinkTime < 10000)) {
+    console.log('⚠️ Relink is already in progress or recently executed, skipping duplicate.');
+    return;
+  }
+  isRelinkingWa = true;
+  lastRelinkTime = now;
+
   console.log('🔄 Resetting WhatsApp session for clean relink & pairing...');
   hasAnnouncedConnected = false;
   connectionStatus.connected = false;
   connectionStatus.userJid = null;
+  latestQrString = null;
+  latestQrBuffer = null;
 
   if (activeAuthCleanup) {
     try {
@@ -1584,13 +1660,20 @@ export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bo
     console.warn('Error clearing Turso tables on relink:', err.message);
   }
 
-  await bot.telegram.sendMessage(
-    groupId,
-    '🔄 <b>Generating New WhatsApp QR Code:</b>\nPlease wait a moment for the new pairing QR code to appear below.\nOnce it appears, scan in <b>WhatsApp > Linked Devices</b>.',
-    getTopicExtra(generalTopicId, { parse_mode: 'HTML' })
-  );
+  try {
+    await retryTelegramCall(async () => {
+      await bot.telegram.sendMessage(
+        groupId,
+        '🔄 <b>Generating New WhatsApp QR Code:</b>\nPlease wait a moment for the new pairing QR code to appear below.\nOnce it appears, scan in <b>WhatsApp > Linked Devices</b>.',
+        getTopicExtra(generalTopicId, { parse_mode: 'HTML' })
+      );
+    }, 2, 800);
+  } catch (err) {
+    console.warn('Could not send relink status notice to Telegram:', err.message);
+  }
 
   setTimeout(() => {
+    isRelinkingWa = false;
     initWhatsApp({ client, sessionId, bot, groupId, generalTopicId });
   }, 1000);
 }

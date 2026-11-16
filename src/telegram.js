@@ -1,3 +1,4 @@
+import https from 'https';
 import { Telegraf } from 'telegraf';
 import {
   getMappingByTopicId,
@@ -16,6 +17,38 @@ import { recordBotSentMessage, syncContactsAndTopics, syncAllGroups } from './wh
 let botInstance = null;
 let currentGroupId = null;
 let currentGeneralTopicId = 1;
+const botLaunchTime = Math.floor(Date.now() / 1000);
+
+/**
+ * Retry helper for Telegram API calls with exponential backoff on network errors & rate limits
+ */
+export async function retryTelegramCall(fn, maxRetries = 3, initialDelay = 1000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const errMsg = err?.message || String(err);
+      const isNetworkError =
+        errMsg.includes('socket hang up') ||
+        errMsg.includes('ECONNRESET') ||
+        errMsg.includes('ETIMEDOUT') ||
+        errMsg.includes('EAI_AGAIN') ||
+        errMsg.includes('ENOTFOUND') ||
+        errMsg.includes('Client network socket disconnected') ||
+        errMsg.includes('fetch failed');
+
+      const retryAfter = err?.parameters?.retry_after;
+
+      if ((isNetworkError || retryAfter) && attempt < maxRetries) {
+        const delay = retryAfter ? (retryAfter + 1) * 1000 : initialDelay * Math.pow(2, attempt - 1);
+        console.warn(`⚠️ Telegram transient network issue (${errMsg}). Retrying in ${delay}ms (attempt ${attempt}/${maxRetries})...`);
+        await new Promise(res => setTimeout(res, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 function getReplyExtra(ctx, extra = {}) {
   const result = { ...extra };
@@ -34,7 +67,18 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
     throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_GROUP_ID are required.');
   }
 
-  const bot = new Telegraf(botToken);
+  const bot = new Telegraf(botToken, {
+    telegram: {
+      agent: new https.Agent({
+        keepAlive: true,
+        keepAliveMsecs: 10000,
+        timeout: 60000
+      }),
+      attachmentAgent: new https.Agent({
+        keepAlive: false // Do not reuse keep-alive sockets for file/photo uploads to prevent socket hang up
+      })
+    }
+  });
   botInstance = bot;
   currentGroupId = groupId.toString();
   currentGeneralTopicId = parseInt(generalTopicId, 10) || 1;
@@ -309,6 +353,11 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
   });
 
   bot.command('relink', async (ctx) => {
+    // Ignore backlog messages sent while bot was offline
+    if (ctx.message?.date && ctx.message.date < botLaunchTime - 30) {
+      console.log('⚠️ Ignoring stale /relink command from Telegram backlog.');
+      return;
+    }
     if (onRelink) {
       await onRelink();
     }
