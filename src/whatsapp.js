@@ -1,6 +1,7 @@
 import makeWASocket, {
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  Browsers
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -23,6 +24,7 @@ import {
 import { sanitizeTopicName, downloadWaMedia, getProfilePictureBuffer } from './media.js';
 
 let sockInstance = null;
+let activeAuthCleanup = null;
 let hasAnnouncedConnected = false;
 let connectionStatus = {
   connected: false,
@@ -97,7 +99,7 @@ export async function resolveChatTitle(sock, jid, pushName = null) {
   }
 
   // 3. System / Broadcast
-  if (cleanId === '0' || jid === '0@s.whatsapp.net') {
+  if (cleanId === '0' || jid === '0@s.whatsapp.net' || cleanId === '+0' || !cleanId) {
     return '📱 WhatsApp System';
   }
 
@@ -105,36 +107,39 @@ export async function resolveChatTitle(sock, jid, pushName = null) {
   const contact = await getContact(jid);
   if (contact) {
     const rawPhone = contact.phone_number || (!contact.wa_id?.includes('@lid') ? contact.wa_id?.split('@')[0]?.split(':')[0] : '');
-    const phoneDisplay = rawPhone && rawPhone !== '0' && !rawPhone.includes('@') ? ` (+${rawPhone})` : '';
+    const validPhone = rawPhone && rawPhone.length >= 7 && !rawPhone.includes('@') && rawPhone !== '0' ? ` (+${rawPhone})` : '';
 
-    if (contact.name) {
-      return `${contact.name}${phoneDisplay}`;
+    if (contact.name && contact.name.trim()) {
+      return `${contact.name.trim()}${validPhone}`;
     }
-    if (phoneDisplay) {
-      return `${pushName ? `${pushName} ` : ''}${phoneDisplay}`.trim();
+    if (pushName && pushName.trim()) {
+      return `${pushName.trim()}${validPhone}`;
+    }
+    if (validPhone) {
+      return `Contact${validPhone}`;
     }
   }
 
   // 5. If it's a standard phone JID
   if (jid.endsWith('@s.whatsapp.net')) {
     const phone = jid.split('@')[0]?.split(':')[0];
-    if (phone && phone !== '0') {
-      const namePart = pushName ? `${pushName} ` : '';
+    if (phone && phone.length >= 7 && phone !== '0') {
+      const namePart = pushName && pushName.trim() ? `${pushName.trim()} ` : '';
       return `${namePart}(+${phone})`.trim();
     }
   }
 
   // 6. Push name fallback
-  if (pushName) {
-    return pushName;
+  if (pushName && pushName.trim()) {
+    return pushName.trim();
   }
 
   // 7. Fallback for unmapped LID
   if (jid.endsWith('@lid')) {
-    return `WhatsApp User (${cleanId.slice(-4)})`;
+    return `WhatsApp Contact (${cleanId.slice(-4)})`;
   }
 
-  return cleanId || 'WhatsApp Chat';
+  return cleanId && cleanId.length < 12 ? cleanId : 'WhatsApp Contact';
 }
 
 /**
@@ -423,21 +428,38 @@ export async function initWhatsApp({
     sockInstance = null;
   }
 
-  const { state, saveCreds } = await useTursoAuthState(client, sessionId);
-  const { version } = await fetchLatestBaileysVersion();
+  if (activeAuthCleanup) {
+    try {
+      activeAuthCleanup();
+    } catch (_) {}
+    activeAuthCleanup = null;
+  }
+
+  const { state, saveCreds, cleanup } = await useTursoAuthState(client, sessionId);
+  activeAuthCleanup = cleanup;
+
+  let version = [2, 3000, 1043857760];
+  try {
+    const versionPromise = fetchLatestBaileysVersion();
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000));
+    const res = await Promise.race([versionPromise, timeoutPromise]);
+    if (res?.version) version = res.version;
+  } catch (_) {
+    console.log('⚡ Using stable fallback Baileys version');
+  }
 
   const sock = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: Browsers.macOS('Desktop'),
     msgRetryCounterCache,
     getMessage: async (key) => {
       const cached = rawMessageCache.get(key.id);
       if (cached) return cached;
       return undefined;
     },
-    syncFullHistory: true,
+    syncFullHistory: false,
     shouldSyncHistoryMessage: () => true,
     defaultQueryTimeoutMs: 60000
   });
@@ -621,7 +643,7 @@ let lastAnnounceTime = 0;
     }
   });
 
-  // ================= 2. AUTO-IMPORT TOPICS FOR ALL CHATS ================= //
+  // ================= 2. PROCESS CHATS & UPDATE TOPIC NAMES ================= //
   sock.ev.on('chats.upsert', async (chats) => {
     console.log(`📥 Received chats.upsert with ${chats.length} chats`);
     for (const chat of chats) {
@@ -640,7 +662,7 @@ let lastAnnounceTime = 0;
           phoneNumber: phone,
           lid: lidJid
         });
-        if (lidJid && pnJid) {
+        if (lidJid && (phone || name)) {
           await saveContact({
             waId: lidJid,
             name,
@@ -650,49 +672,10 @@ let lastAnnounceTime = 0;
         }
       }
 
+      // Upgrade existing topic name if it currently has raw digits or (+0)
       const existing = await getMappingByWaId(waId);
-      if (!existing) {
-        const isGroup = waId.endsWith('@g.us');
-        let chatTitle = await resolveChatTitle(sock, waId, chat.name || chat.displayName);
-        const safeTitle = sanitizeTopicName(chatTitle);
-
-        try {
-          const topic = await bot.telegram.createForumTopic(groupId, safeTitle);
-          await saveMapping({
-            waId,
-            topicId: topic.message_thread_id,
-            chatName: safeTitle,
-            isGroup
-          });
-
-          // Fetch & pin profile photo card
-          const avatarBuffer = await getProfilePictureBuffer(sock, waId);
-          if (avatarBuffer) {
-            const card = await bot.telegram.sendPhoto(
-              groupId,
-              { source: avatarBuffer },
-              {
-                message_thread_id: topic.message_thread_id,
-                caption: `📸 <b>${safeTitle}</b>\nWhatsApp: <code>${waId.split('@')[0]}</code>`,
-                parse_mode: 'HTML'
-              }
-            ).catch(() => null);
-
-            if (card) {
-              await bot.telegram.pinChatMessage(groupId, card.message_id, {
-                disable_notification: true
-              }).catch(() => {});
-            }
-          }
-
-          console.log(`✨ Auto-imported topic for "${safeTitle}" (${waId})`);
-          await new Promise(r => setTimeout(r, 600)); // Rate limit buffer
-        } catch (err) {
-          console.error(`Error auto-importing topic for chat ${waId}:`, err.message);
-        }
-      } else {
-        // Upgrade topic name if it's currently raw digits
-        if (/^\d+$/.test(existing.chat_name) || existing.chat_name.includes('(+0)')) {
+      if (existing) {
+        if (/^\d+$/.test(existing.chat_name) || existing.chat_name.includes('(+0)') || existing.chat_name.startsWith('WhatsApp')) {
           const newTitle = await resolveChatTitle(sock, waId, chat.name || chat.displayName);
           const safeTitle = sanitizeTopicName(newTitle);
           if (safeTitle !== existing.chat_name && !/^\d+$/.test(safeTitle)) {
@@ -820,7 +803,22 @@ let lastAnnounceTime = 0;
       let mapping = await getMappingByWaId(chatJid);
 
       if (!mapping) {
-        const resolvedTitle = await resolveChatTitle(sock, chatJid);
+        // Extract best display name from incoming messages in this chat
+        const msgs = messagesByChat.get(chatJid) || [];
+        const incomingWithPush = msgs.find(m => !m.key.fromMe && m.pushName);
+        const bestPushName = incomingWithPush?.pushName || null;
+
+        if (bestPushName) {
+          try {
+            await saveContact({
+              waId: chatJid,
+              name: bestPushName,
+              lid: chatJid.endsWith('@lid') ? chatJid : null
+            });
+          } catch (_) {}
+        }
+
+        const resolvedTitle = await resolveChatTitle(sock, chatJid, bestPushName);
         const safeTitle = sanitizeTopicName(resolvedTitle);
 
         try {
@@ -840,7 +838,7 @@ let lastAnnounceTime = 0;
               { source: avatarBuffer },
               {
                 message_thread_id: topic.message_thread_id,
-                caption: `📸 <b>${safeTitle}</b>\nWhatsApp: <code>${chatJid.split('@')[0]}</code>`,
+                caption: `📸 <b>${safeTitle}</b>`,
                 parse_mode: 'HTML'
               }
             ).catch(() => null);
@@ -1556,8 +1554,18 @@ function escapeHtml(text) {
 }
 
 export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bot, groupId, generalTopicId = 1 }) {
-  console.log('🔄 Resetting WhatsApp session for full 31-day history & media sync...');
+  console.log('🔄 Resetting WhatsApp session for clean relink & pairing...');
   hasAnnouncedConnected = false;
+  connectionStatus.connected = false;
+  connectionStatus.userJid = null;
+
+  if (activeAuthCleanup) {
+    try {
+      activeAuthCleanup();
+    } catch (_) {}
+    activeAuthCleanup = null;
+  }
+
   if (sockInstance) {
     try {
       sockInstance.ev.removeAllListeners();
@@ -1565,17 +1573,24 @@ export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bo
     } catch (_) {}
     sockInstance = null;
   }
-  await client.execute({
-    sql: 'DELETE FROM wa_auth_sessions WHERE session_id = ?',
-    args: [sessionId]
-  });
-  await client.execute('DELETE FROM message_history');
+
+  try {
+    await client.execute({
+      sql: 'DELETE FROM wa_auth_sessions WHERE session_id = ?',
+      args: [sessionId]
+    });
+    await client.execute('DELETE FROM message_history');
+  } catch (err) {
+    console.warn('Error clearing Turso tables on relink:', err.message);
+  }
+
   await bot.telegram.sendMessage(
     groupId,
-    '🔄 <b>WhatsApp Session Reset:</b>\nGenerating a brand new QR code with <b>Full 31-Day History Sync enabled</b>...\nAll photos, documents, and groups will be routed to topics and backed up in <b>📁 Files & Media Storage</b>.',
+    '🔄 <b>Generating New WhatsApp QR Code:</b>\nPlease wait a moment for the new pairing QR code to appear below.\nOnce it appears, scan in <b>WhatsApp > Linked Devices</b>.',
     getTopicExtra(generalTopicId, { parse_mode: 'HTML' })
   );
+
   setTimeout(() => {
     initWhatsApp({ client, sessionId, bot, groupId, generalTopicId });
-  }, 2000);
+  }, 1000);
 }

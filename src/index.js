@@ -43,19 +43,19 @@ async function main() {
     process.exit(1);
   }
 
-  // 1. Initialize Turso Edge SQLite Database & run migrations
+  // 1. Start Health & Decoy Blog Server Immediately (Render Web Service requirement)
+  createHealthServer(() => ({
+    waConnected: getWaStatus().connected,
+    user: getWaStatus().userJid
+  }));
+
+  // 2. Initialize Turso Edge SQLite Database & run migrations
   console.log('📦 Connecting to Turso database at:', dbUrl);
   const dbClient = initDb({
     url: dbUrl,
     authToken: TURSO_AUTH_TOKEN
   });
   await runMigrations();
-
-  // 2. Start Health Check Server (Render Web Service requirement)
-  createHealthServer(() => ({
-    waConnected: getWaStatus().connected,
-    user: getWaStatus().userJid
-  }));
 
   // 3. Initialize Telegram Bot
   console.log('🤖 Initializing Telegram bot...');

@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     wa_id TEXT PRIMARY KEY,
     name TEXT,
     phone_number TEXT,
+    lid TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
+CREATE INDEX IF NOT EXISTS idx_contacts_lid ON contacts(lid);

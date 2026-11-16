@@ -11,19 +11,21 @@ export function createHealthServer(getStatus) {
 
   app.use(express.json());
 
-  // Serve modern camouflage landing page on root /
-  app.use(express.static(publicDir));
-  app.get('/', (req, res) => {
-    res.sendFile(path.join(publicDir, 'index.html'));
-  });
-
   // Render & Uptime robot health check endpoint
   app.get('/health', (req, res) => {
     res.status(200).send('OK');
   });
 
-  const server = app.listen(PORT, () => {
-    console.log(`🚀 Web service listening on port ${PORT}`);
+  // Serve static assets from public directory
+  app.use(express.static(publicDir));
+
+  // Catch-all: Any path/subpath displays the modern magazine editorial blog
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Modern blog & health service listening on port ${PORT} (0.0.0.0)`);
   });
 
   return server;

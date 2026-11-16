@@ -3,21 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VortexMesh | Distributed Edge Runtime &amp; Telemetry Gateway</title>
+  <title>The Luminary | Contemporary Culture, Design, Architecture &amp; Living</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;800&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,400&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #07090e;
-      --card-bg: rgba(15, 23, 42, 0.65);
+      --bg: #0c0e12;
+      --card-bg: #14171f;
       --card-border: rgba(255, 255, 255, 0.08);
-      --primary: #38bdf8;
-      --primary-glow: rgba(56, 189, 248, 0.25);
-      --secondary: #818cf8;
-      --accent: #10b981;
-      --text: #f1f5f9;
-      --text-muted: #94a3b8;
+      --accent: #d4a373;
+      --accent-light: #faedcd;
+      --text: #f8f9fa;
+      --text-muted: #9ca3af;
+      --font-serif: 'Newsreader', Georgia, serif;
+      --font-display: 'Cinzel', serif;
+      --font-sans: 'Plus Jakarta Sans', sans-serif;
     }
     * {
       box-sizing: border-box;
@@ -27,468 +28,559 @@
     body {
       background-color: var(--bg);
       color: var(--text);
-      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: var(--font-sans);
+      line-height: 1.7;
       overflow-x: hidden;
-      line-height: 1.6;
     }
-    /* Subtle background grid & glow */
-    .bg-grid {
-      position: fixed;
-      inset: 0;
-      background-image: 
-        radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.12) 0%, transparent 50%),
-        radial-gradient(circle at 80% 60%, rgba(129, 140, 248, 0.08) 0%, transparent 45%),
-        linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-      background-size: 100% 100%, 100% 100%, 48px 48px, 48px 48px;
-      pointer-events: none;
-      z-index: -1;
+    /* Top announcement bar */
+    .top-bar {
+      background: #11141a;
+      border-bottom: 1px solid var(--card-border);
+      text-align: center;
+      padding: 0.5rem 1rem;
+      font-size: 0.8rem;
+      color: var(--accent);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 600;
     }
+    /* Header */
     header {
+      max-width: 1300px;
+      margin: 0 auto;
+      padding: 2rem 2rem 1.5rem;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .header-main {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 1.5rem 3rem;
-      border-bottom: 1px solid var(--card-border);
-      backdrop-filter: blur(12px);
-      position: sticky;
-      top: 0;
-      z-index: 50;
-      background: rgba(7, 9, 14, 0.85);
+      margin-bottom: 1.75rem;
     }
-    .logo {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      font-weight: 800;
-      font-size: 1.25rem;
-      letter-spacing: -0.02em;
-    }
-    .logo-icon {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, var(--primary), var(--secondary));
-      display: grid;
-      place-items: center;
-      box-shadow: 0 0 16px var(--primary-glow);
-    }
-    nav {
-      display: flex;
-      gap: 2rem;
-      align-items: center;
-    }
-    nav a {
+    .date-indicator {
+      font-size: 0.82rem;
       color: var(--text-muted);
-      text-decoration: none;
-      font-size: 0.92rem;
-      font-weight: 500;
-      transition: color 0.2s;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
     }
-    nav a:hover {
-      color: var(--text);
-    }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.65rem 1.25rem;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 0.9rem;
-      text-decoration: none;
-      cursor: pointer;
-      transition: all 0.2s;
-      border: none;
-    }
-    .btn-primary {
-      background: linear-gradient(135deg, #0ea5e9, #6366f1);
-      color: #fff;
-      box-shadow: 0 0 20px rgba(14, 165, 233, 0.35);
-    }
-    .btn-primary:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 0 25px rgba(14, 165, 233, 0.5);
-    }
-    .btn-secondary {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid var(--card-border);
-      color: var(--text);
-    }
-    .btn-secondary:hover {
-      background: rgba(255, 255, 255, 0.1);
-    }
-    .hero {
-      max-width: 1200px;
-      margin: 5rem auto 3rem;
-      padding: 0 2rem;
+    .site-title {
+      font-family: var(--font-display);
+      font-size: clamp(2rem, 4vw, 3.25rem);
+      font-weight: 700;
+      letter-spacing: 0.06em;
       text-align: center;
+      text-transform: uppercase;
+      color: #fff;
     }
-    .badge-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.35rem 0.9rem;
-      border-radius: 9999px;
-      background: rgba(56, 189, 248, 0.08);
-      border: 1px solid rgba(56, 189, 248, 0.25);
-      color: var(--primary);
-      font-size: 0.85rem;
-      font-weight: 600;
-      margin-bottom: 1.5rem;
+    .site-title span {
+      color: var(--accent);
     }
-    .pulse-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--accent);
-      box-shadow: 0 0 10px var(--accent);
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.85); }
-    }
-    h1 {
-      font-size: clamp(2.5rem, 5.5vw, 4.25rem);
-      font-weight: 800;
-      letter-spacing: -0.035em;
-      line-height: 1.15;
-      margin-bottom: 1.5rem;
-    }
-    .grad-text {
-      background: linear-gradient(135deg, #ffffff 30%, #38bdf8 70%, #818cf8 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    .hero p {
-      max-width: 720px;
-      margin: 0 auto 2.5rem;
-      color: var(--text-muted);
-      font-size: 1.15rem;
-      font-weight: 400;
-    }
-    .cta-row {
+    .nav-links {
       display: flex;
       justify-content: center;
-      gap: 1rem;
-      margin-bottom: 4rem;
+      gap: 2.5rem;
+      list-style: none;
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+      padding-top: 1rem;
     }
-    /* Metrics strip */
-    .metrics-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 1.5rem;
-      max-width: 1200px;
-      margin: 0 auto 5rem;
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.88rem;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      transition: color 0.2s;
+      cursor: pointer;
+    }
+    .nav-links a:hover, .nav-links a.active {
+      color: var(--accent);
+    }
+    /* Main container */
+    .container {
+      max-width: 1300px;
+      margin: 3rem auto;
       padding: 0 2rem;
     }
-    .metric-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
+    /* Featured Lead Article */
+    .lead-story {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 3rem;
+      align-items: center;
+      margin-bottom: 5rem;
+      padding-bottom: 4rem;
+      border-bottom: 1px solid var(--card-border);
+      cursor: pointer;
+    }
+    .lead-img-wrap {
       border-radius: 12px;
-      padding: 1.75rem;
-      text-align: left;
+      overflow: hidden;
+      aspect-ratio: 16 / 10;
       position: relative;
-      overflow: hidden;
     }
-    .metric-card::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
+    .lead-img-wrap img {
       width: 100%;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, var(--primary), transparent);
+      height: 100%;
+      object-fit: cover;
+      transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .metric-val {
-      font-size: 2.2rem;
-      font-weight: 800;
-      letter-spacing: -0.02em;
+    .lead-story:hover .lead-img-wrap img {
+      transform: scale(1.03);
+    }
+    .tag {
+      display: inline-block;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 0.75rem;
+    }
+    .lead-title {
+      font-family: var(--font-serif);
+      font-size: clamp(2rem, 3.2vw, 2.75rem);
+      font-weight: 400;
+      line-height: 1.25;
+      margin-bottom: 1rem;
       color: #fff;
-      font-family: 'JetBrains Mono', monospace;
     }
-    .metric-label {
+    .lead-excerpt {
       color: var(--text-muted);
-      font-size: 0.88rem;
-      margin-top: 0.35rem;
+      font-size: 1.05rem;
+      margin-bottom: 1.5rem;
     }
-    /* Console preview */
-    .console-box {
-      max-width: 900px;
-      margin: 0 auto 6rem;
-      background: #0b101b;
-      border: 1px solid var(--card-border);
-      border-radius: 14px;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
-      overflow: hidden;
-      font-family: 'JetBrains Mono', monospace;
-      text-align: left;
-    }
-    .console-header {
-      background: #0f172a;
-      padding: 0.75rem 1.25rem;
+    .meta-row {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
-      border-bottom: 1px solid var(--card-border);
+      gap: 1rem;
+      font-size: 0.85rem;
+      color: var(--text-muted);
     }
-    .dot {
-      width: 11px;
-      height: 11px;
+    .author-avatar {
+      width: 32px;
+      height: 32px;
       border-radius: 50%;
+      object-fit: cover;
     }
-    .dot-red { background: #ef4444; }
-    .dot-yellow { background: #f59e0b; }
-    .dot-green { background: #10b981; }
-    .console-title {
-      color: var(--text-muted);
-      font-size: 0.8rem;
-      margin-left: 0.5rem;
-    }
-    .console-body {
-      padding: 1.5rem;
-      font-size: 0.88rem;
-      color: #cbd5e1;
-      line-height: 1.75;
-    }
-    .c-green { color: #34d399; }
-    .c-blue { color: #38bdf8; }
-    .c-gray { color: #64748b; }
-    /* Features */
-    .features-section {
-      max-width: 1200px;
-      margin: 0 auto 6rem;
-      padding: 0 2rem;
-    }
-    .section-head {
-      text-align: center;
-      margin-bottom: 3.5rem;
-    }
-    .section-head h2 {
-      font-size: 2.2rem;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-    }
-    .features-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 2rem;
-    }
-    .feature-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 14px;
-      padding: 2rem;
-      transition: border-color 0.2s, transform 0.2s;
-    }
-    .feature-card:hover {
-      border-color: rgba(56, 189, 248, 0.3);
-      transform: translateY(-2px);
-    }
-    .f-icon {
-      width: 44px;
-      height: 44px;
-      border-radius: 10px;
-      background: rgba(56, 189, 248, 0.1);
-      display: grid;
-      place-items: center;
-      color: var(--primary);
-      margin-bottom: 1.25rem;
-    }
-    .feature-card h3 {
-      font-size: 1.2rem;
-      font-weight: 700;
-      margin-bottom: 0.6rem;
-    }
-    .feature-card p {
-      color: var(--text-muted);
-      font-size: 0.95rem;
-    }
-    /* Status banner */
-    .status-bar {
-      max-width: 1200px;
-      margin: 0 auto 5rem;
-      padding: 1.25rem 2rem;
-      background: rgba(16, 185, 129, 0.05);
-      border: 1px solid rgba(16, 185, 129, 0.2);
-      border-radius: 12px;
+    /* Section Title */
+    .section-header {
       display: flex;
       justify-content: space-between;
-      align-items: center;
-      flex-wrap: gap;
+      align-items: flex-end;
+      margin-bottom: 2.5rem;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 0.75rem;
     }
-    .status-left {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
+    .section-title {
+      font-family: var(--font-display);
+      font-size: 1.4rem;
       font-weight: 600;
-      font-size: 0.95rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
     }
+    /* Grid */
+    .articles-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 2.5rem;
+      margin-bottom: 5rem;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      cursor: pointer;
+      transition: transform 0.25s, border-color 0.25s;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(212, 163, 115, 0.35);
+    }
+    .card-img {
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      object-fit: cover;
+    }
+    .card-content {
+      padding: 1.75rem;
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
+    .card-title {
+      font-family: var(--font-serif);
+      font-size: 1.4rem;
+      font-weight: 400;
+      line-height: 1.35;
+      margin-bottom: 0.75rem;
+      color: #fff;
+    }
+    .card-text {
+      color: var(--text-muted);
+      font-size: 0.92rem;
+      margin-bottom: 1.5rem;
+      flex: 1;
+    }
+    /* Newsletter */
+    .newsletter-box {
+      background: linear-gradient(135deg, #141720, #191e2b);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 4rem 2rem;
+      text-align: center;
+      margin: 4rem 0 6rem;
+    }
+    .newsletter-box h3 {
+      font-family: var(--font-serif);
+      font-size: 2.2rem;
+      margin-bottom: 0.75rem;
+    }
+    .newsletter-box p {
+      color: var(--text-muted);
+      max-width: 550px;
+      margin: 0 auto 2rem;
+      font-size: 1rem;
+    }
+    .newsletter-form {
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    .newsletter-input {
+      flex: 1;
+      padding: 0.85rem 1.25rem;
+      border-radius: 8px;
+      border: 1px solid var(--card-border);
+      background: rgba(0, 0, 0, 0.4);
+      color: #fff;
+      font-size: 0.92rem;
+      outline: none;
+    }
+    .newsletter-btn {
+      background: var(--accent);
+      color: #0c0e12;
+      border: none;
+      padding: 0.85rem 1.75rem;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 0.88rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .newsletter-btn:hover {
+      background: var(--accent-light);
+    }
+    /* Modal reader */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      z-index: 100;
+      display: none;
+      place-items: center;
+      padding: 2rem 1rem;
+      overflow-y: auto;
+    }
+    .modal-backdrop.open {
+      display: grid;
+    }
+    .modal-content {
+      background: #12151c;
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      max-width: 800px;
+      width: 100%;
+      padding: 3rem;
+      position: relative;
+      margin: auto;
+    }
+    .modal-close {
+      position: absolute;
+      top: 1.5rem;
+      right: 1.5rem;
+      background: rgba(255, 255, 255, 0.08);
+      border: none;
+      color: #fff;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      font-size: 1.2rem;
+    }
+    .modal-article-title {
+      font-family: var(--font-serif);
+      font-size: 2.4rem;
+      line-height: 1.25;
+      margin: 1rem 0 1.5rem;
+    }
+    .modal-body {
+      color: #d1d5db;
+      font-size: 1.08rem;
+      line-height: 1.85;
+      margin-top: 1.5rem;
+    }
+    .modal-body p {
+      margin-bottom: 1.25rem;
+    }
+    .quote-box {
+      border-left: 3px solid var(--accent);
+      padding-left: 1.5rem;
+      margin: 2rem 0;
+      font-family: var(--font-serif);
+      font-style: italic;
+      color: var(--accent-light);
+      font-size: 1.2rem;
+    }
+    /* Footer */
     footer {
       border-top: 1px solid var(--card-border);
-      padding: 3rem 2rem;
+      padding: 4rem 2rem 3rem;
       text-align: center;
       color: var(--text-muted);
-      font-size: 0.88rem;
+      font-size: 0.85rem;
     }
     footer a {
       color: var(--text-muted);
       text-decoration: none;
-      margin: 0 0.75rem;
+      margin: 0 1rem;
     }
     footer a:hover {
-      color: var(--text);
+      color: var(--accent);
+    }
+    @media (max-width: 860px) {
+      .lead-story {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+      }
+      .nav-links {
+        display: none;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="bg-grid"></div>
+  <div class="top-bar">
+    Volume XXIV • Issue 11 • The Autumn Architecture &amp; Spatial Journal
+  </div>
 
   <header>
-    <div class="logo">
-      <div class="logo-icon">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-          <polyline points="2 17 12 22 22 17"></polyline>
-          <polyline points="2 12 12 17 22 12"></polyline>
-        </svg>
-      </div>
-      <span>VortexMesh</span>
+    <div class="header-main">
+      <div class="date-indicator">November 2026 Edition</div>
+      <div class="site-title">The <span>Luminary</span></div>
+      <div class="date-indicator">Est. 2018</div>
     </div>
-    <nav>
-      <a href="#architecture">Architecture</a>
-      <a href="#telemetry">Telemetry</a>
-      <a href="#security">Zero-Trust</a>
-      <a href="#benchmarks">Benchmarks</a>
-      <a href="#docs" class="btn btn-secondary">Documentation</a>
-    </nav>
+    <ul class="nav-links">
+      <li><a class="active" onclick="filterCategory('All')">All Dispatches</a></li>
+      <li><a onclick="filterCategory('Architecture')">Architecture</a></li>
+      <li><a onclick="filterCategory('Design')">Design</a></li>
+      <li><a onclick="filterCategory('Living')">Spatial Living</a></li>
+      <li><a onclick="filterCategory('Essays')">Critical Essays</a></li>
+    </ul>
   </header>
 
-  <main>
-    <section class="hero">
-      <div class="badge-pill">
-        <span class="pulse-dot"></span>
-        v4.19.2 Edge Quorum Operational • 42 Global Regions
+  <main class="container">
+    <!-- Lead Story -->
+    <article class="lead-story" onclick="openArticle(0)">
+      <div class="lead-img-wrap">
+        <img src="https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80" alt="Monolithic Pavilion">
       </div>
-      <h1>
-        High-Throughput Distributed Telemetry &amp; <br>
-        <span class="grad-text">Autonomous Edge Event Fabric</span>
-      </h1>
-      <p>
-        Purpose-built distributed runtime engineered for sub-millisecond event replication, Byzantine consensus verification, and zero-allocation cryptographic memory envelopes.
-      </p>
-      <div class="cta-row">
-        <a href="#deploy" class="btn btn-primary">Deploy Cluster Node</a>
-        <a href="#specs" class="btn btn-secondary">Read Technical Spec &rarr;</a>
-      </div>
-    </section>
-
-    <!-- Real-time metrics -->
-    <section class="metrics-grid" id="telemetry">
-      <div class="metric-card">
-        <div class="metric-val" id="metric-latency">3.8 ms</div>
-        <div class="metric-label">p99 Global Edge Latency</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-val">99.999%</div>
-        <div class="metric-label">Consensus SLA Uptime</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-val" id="metric-throughput">1.48M</div>
-        <div class="metric-label">Events / Second Replicated</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-val">0 B</div>
-        <div class="metric-label">Unbounded Buffer Allocation</div>
-      </div>
-    </section>
-
-    <!-- Terminal simulator -->
-    <section class="console-box" id="architecture">
-      <div class="console-header">
-        <span class="dot dot-red"></span>
-        <span class="dot dot-yellow"></span>
-        <span class="dot dot-green"></span>
-        <span class="console-title">vortex-cli — bash — 80x24</span>
-      </div>
-      <div class="console-body">
-        <p><span class="c-gray">$</span> <span class="c-blue">vortex-ctl</span> cluster status --region global</p>
-        <p><span class="c-green">[OK]</span> Target: <code>global-mesh.vortexmesh.internal:8443</code> (mTLS 1.3 Quantum-Resistant)</p>
-        <p><span class="c-green">[OK]</span> Shard Topology: 64 active partitions across 42 availability zones</p>
-        <p><span class="c-green">[OK]</span> Raft State Machine: Stable (Epoch 9207259, Term 412)</p>
-        <p><span class="c-green">[OK]</span> In-memory Journal: Synchronized (0 pending mutations)</p>
-        <p><span class="c-blue">→ Health Check:</span> HTTP/2 probe verified • Status 200 OK (0.42ms)</p>
-      </div>
-    </section>
-
-    <!-- Feature Grid -->
-    <section class="features-section" id="security">
-      <div class="section-head">
-        <h2>Enterprise Edge Architecture</h2>
-        <p style="color: var(--text-muted); margin-top: 0.5rem;">Hardened infrastructure primitives designed for deterministic real-time workloads.</p>
-      </div>
-      <div class="features-grid">
-        <div class="feature-card">
-          <div class="f-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          </div>
-          <h3>Zero-Trust Enclaves</h3>
-          <p>Every ingress stream undergoes continuous cryptographically attested mutual TLS with dynamic rotation and non-repudiation logging.</p>
-        </div>
-        <div class="feature-card">
-          <div class="f-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m10 15 5-3-5-3v6z"/></svg>
-          </div>
-          <h3>Deterministic Pacing</h3>
-          <p>Autonomous backpressure throttle engines guarantee downstream rate-limit compliance under burst conditions without buffer bloat.</p>
-        </div>
-        <div class="feature-card">
-          <div class="f-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
-          </div>
-          <h3>Replicated Edge SQLite</h3>
-          <p>Microsecond edge-resident state synchronization with distributed snapshot journaling and zero cold-start read latencies.</p>
+      <div>
+        <span class="tag">Architecture &bull; Cover Essay</span>
+        <h2 class="lead-title">The Poetics of Silence: Inside Tadao Ando's Concrete Sanctuaries</h2>
+        <p class="lead-excerpt">
+          Exploring how light, unvarnished reinforced concrete, and water elements cultivate meditative sanctuaries within the kinetic density of the modern metropolis.
+        </p>
+        <div class="meta-row">
+          <img class="author-avatar" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=100&q=80" alt="Elena Vance">
+          <span>By <strong>Elena Vance</strong> &bull; 8 min read</span>
         </div>
       </div>
-    </section>
+    </article>
 
-    <!-- Status Bar -->
-    <div class="status-bar">
-      <div class="status-left">
-        <span class="pulse-dot"></span>
-        <span>Global Network Status: <strong>All 42 Regional Edge Nodes Operational</strong></span>
-      </div>
-      <div style="color: var(--text-muted); font-size: 0.85rem; font-family: 'JetBrains Mono', monospace;">
-        Verified: AWS us-east-1 • Node ID: vtx-9207-live
-      </div>
+    <div class="section-header">
+      <h3 class="section-title">Selected Perspectives</h3>
+      <span style="color: var(--text-muted); font-size: 0.85rem;">Curated Weekly</span>
     </div>
+
+    <!-- Article Grid -->
+    <div class="articles-grid" id="articles-container">
+      <!-- Populated dynamically via JS -->
+    </div>
+
+    <!-- Newsletter signup -->
+    <section class="newsletter-box">
+      <span class="tag">Stay Informed</span>
+      <h3>The Weekly Dispatch</h3>
+      <p>A hand-curated digest of architectural critiques, industrial design reviews, and essays delivered every Sunday morning.</p>
+      <form class="newsletter-form" onsubmit="event.preventDefault(); alert('✓ Thank you for subscribing to The Luminary Weekly Dispatch!');">
+        <input class="newsletter-input" type="email" placeholder="Enter your email address..." required>
+        <button class="newsletter-btn" type="submit">Subscribe</button>
+      </form>
+    </section>
   </main>
 
+  <!-- Modal Reader -->
+  <div class="modal-backdrop" id="article-modal" onclick="closeModal(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="closeModalDirect()">&times;</button>
+      <span class="tag" id="modal-tag">Architecture</span>
+      <h2 class="modal-article-title" id="modal-title"></h2>
+      <div class="meta-row" id="modal-meta"></div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
   <footer>
-    <p>&copy; 2026 VortexMesh Distributed Systems Corp. All rights reserved.</p>
-    <div style="margin-top: 0.75rem;">
-      <a href="#privacy">Privacy Architecture</a>
-      <a href="#security">Security Whitepaper</a>
-      <a href="#compliance">SOC2 Compliance</a>
-      <a href="#terms">Terms of Service</a>
+    <p>&copy; 2026 The Luminary Publishing House. Published independently in London, Zurich &amp; Tokyo.</p>
+    <div style="margin-top: 1rem;">
+      <a href="#about">About the Journal</a>
+      <a href="#editorial">Editorial Board</a>
+      <a href="#submissions">Submissions</a>
+      <a href="#privacy">Privacy &amp; Terms</a>
     </div>
   </footer>
 
   <script>
-    // Subtle real-time metric jitter to make the telemetry feel genuinely live
-    setInterval(() => {
-      const latEl = document.getElementById('metric-latency');
-      const thEl = document.getElementById('metric-throughput');
-      if (latEl) {
-        const lat = (3.6 + Math.random() * 0.5).toFixed(1);
-        latEl.textContent = lat + ' ms';
+    const articles = [
+      {
+        tag: "Architecture • Cover Story",
+        category: "Architecture",
+        title: "The Poetics of Silence: Inside Tadao Ando's Concrete Sanctuaries",
+        excerpt: "Exploring how light, unvarnished reinforced concrete, and water elements cultivate meditative sanctuaries within the kinetic density of the modern metropolis.",
+        author: "Elena Vance",
+        avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=100&q=80",
+        readTime: "8 min read",
+        img: "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=800&q=80",
+        body: `<p>To enter a sanctuary designed by Tadao Ando is to experience an abrupt suspension of velocity. In cities whose sensory architecture is defined by incandescent luminescence and continuous acoustic bombardment, Ando's work provides an uncompromising counterbalance: the architecture of absence.</p>
+        <div class="quote-box">"Architecture must provide a space where human beings can contemplate their own existence amidst stillness."</div>
+        <p>Using silk-smooth formwork concrete punctured only by uniform tie-rod apertures, the structures do not impose upon nature; rather, they capture nature's most elusive elements: diagonal cuts of morning sunlight, reflections across still water basins, and the tactile cooling of wind channeled through narrow stone corridors.</p>
+        <p>This spatial restraint invites the inhabitant into deep contemplation, offering an antidote to the acceleration of 21st-century urban existence.</p>`
+      },
+      {
+        tag: "Design • Industrial",
+        category: "Design",
+        title: "The Tactile Return: Why Physical Controls Are Reclaiming the Cockpit",
+        excerpt: "After a decade of flat capacitive touchscreens, industrial designers are rediscovering the ergonomics and safety of knurled aluminum knobs and tactile switches.",
+        author: "Marcus Thorne",
+        avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=100&q=80",
+        readTime: "5 min read",
+        img: "https://images.unsplash.com/photo-1550009158-9ebf69173e03?auto=format&fit=crop&w=800&q=80",
+        body: `<p>For the past decade, consumer and industrial interfaces pursued an unquestioned orthodoxy: eliminate physical buttons in favor of seamless glass sheets. Yet as human-factor engineers and aviation researchers have demonstrated, tactile feedback remains irreplaceable for rapid, instinctive operation.</p>
+        <div class="quote-box">"Muscular memory operates through resistance, click detents, and physical contours—mechanisms that flat glass can never replicate."</div>
+        <p>From high-end automotive cockpits to studio audio mixing desks, designers are championing precision rotary encoders, mechanical key travel, and tactile toggle levers that allow users to interact without shifting visual focus.</p>`
+      },
+      {
+        tag: "Living • Spatial Design",
+        category: "Living",
+        title: "Monolithic Timber: The Quiet Revolution of Cross-Laminated Wood",
+        excerpt: "How engineered structural mass timber is transforming residential construction from carbon-intensive steel towards warm, organic living envelopes.",
+        author: "Sarah Lindqvist",
+        avatar: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=100&q=80",
+        readTime: "6 min read",
+        img: "https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=800&q=80",
+        body: `<p>Cross-laminated timber (CLT) is no longer a quaint Scandinavian experiment; it has emerged as the definitive material transformation of modern sustainable architecture. By pre-fabricating multi-layered solid timber panels with micron tolerances, architects are erecting multi-story structures with zero concrete curing delays.</p>
+        <p>Beyond structural efficiency, the physiological benefit of living enveloped by natural grain and biophilic warmth significantly lowers resting cortisol levels and enhances acoustic softness.</p>`
+      },
+      {
+        tag: "Essays • Philosophy",
+        category: "Essays",
+        title: "The Typography of Streetscapes: Reading the Visual Grammar of Cities",
+        excerpt: "A photographic and historical dissection of how civic wayfinding, hand-painted storefronts, and cast-iron plaques define the soul of European capitals.",
+        author: "Julian Morra",
+        avatar: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=100&q=80",
+        readTime: "7 min read",
+        img: "https://images.unsplash.com/photo-1508873696983-2df5293cb32f?auto=format&fit=crop&w=800&q=80",
+        body: `<p>Every metropolis speaks in a specific typographic vernacular. Paris whispers in Hector Guimard's Art Nouveau subway arches; London speaks in Johnston's humanist geometry; Zurich articulates in Max Miedinger's rigorous Helvetica.</p>
+        <div class="quote-box">"Type is civic clothing. It reflects the political optimism, industrial prowess, and aesthetic ethos of the era that cast it."</div>
+        <p>When cities replace bespoke historical signage with generic vinyl sheets, they strip away centuries of subconscious local identity.</p>`
+      },
+      {
+        tag: "Architecture • Urbanism",
+        category: "Architecture",
+        title: "Micro-Gardens & Courtyards: The Rebirth of Kyoto Machiya Living",
+        excerpt: "How contemporary Japanese architects are renovating century-old wooden merchant houses, inserting pocket gardens that regulate passive air currents.",
+        author: "Kenji Sato",
+        avatar: "https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&w=100&q=80",
+        readTime: "6 min read",
+        img: "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?auto=format&fit=crop&w=800&q=80",
+        body: `<p>In Kyoto's historical grid, the traditional *machiya*—long, narrow wooden townhouses—relied on internal courtyards called *tsuboniwa*. These tiny green voids, often no larger than two tatami mats, served a profound environmental function: creating low-pressure thermal updrafts that drew cool breezes through the dark wooden interior.</p>
+        <p>Today, a new generation of architects is breathing second life into these historic structures, melding high-performance glazing with Japanese black pine and moss gardens.</p>`
+      },
+      {
+        tag: "Design • Craftsmanship",
+        category: "Design",
+        title: "In Praise of Shadows: The Enduring Alchemy of Raw Ceramics",
+        excerpt: "Meeting the ceramicists of Shigaraki who fire stoneware in wood-burning anagama kilns for seven days, letting natural wood ash glaze each vessel.",
+        author: "Elena Vance",
+        avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=100&q=80",
+        readTime: "5 min read",
+        img: "https://images.unsplash.com/photo-1578749556568-bc2c40e68b61?auto=format&fit=crop&w=800&q=80",
+        body: `<p>In an age of laser sintering and automated porcelain casting, the ancient anagama kilns of Shigaraki remain stubbornly analog. Wood ash carried by superheated air currents melts onto raw clay surfaces, leaving unpredictable crystalline embers and scorched copper blushes.</p>
+        <p>No two cups or bowls are identical. Each piece carries the permanent record of flame turbulence, timber species, and seven sleepless days of human tending.</p>`
       }
-      if (thEl) {
-        const val = (1.45 + Math.random() * 0.08).toFixed(2);
-        thEl.textContent = val + 'M';
+    ];
+
+    function renderArticles(filter = "All") {
+      const container = document.getElementById('articles-container');
+      const filtered = filter === "All" ? articles.slice(1) : articles.filter(a => a.category === filter);
+      
+      container.innerHTML = filtered.map((a, idx) => `
+        <article class="card" onclick="openArticle(${articles.indexOf(a)})">
+          <img class="card-img" src="${a.img}" alt="${a.title}">
+          <div class="card-content">
+            <span class="tag">${a.tag}</span>
+            <h4 class="card-title">${a.title}</h4>
+            <p class="card-text">${a.excerpt}</p>
+            <div class="meta-row">
+              <img class="author-avatar" src="${a.avatar}" alt="${a.author}">
+              <span>${a.author} &bull; ${a.readTime}</span>
+            </div>
+          </div>
+        </article>
+      `).join('');
+    }
+
+    function filterCategory(cat) {
+      document.querySelectorAll('.nav-links a').forEach(el => {
+        el.classList.toggle('active', el.textContent.includes(cat) || (cat === 'All' && el.textContent.includes('All')));
+      });
+      renderArticles(cat);
+    }
+
+    function openArticle(index) {
+      const a = articles[index];
+      document.getElementById('modal-tag').textContent = a.tag;
+      document.getElementById('modal-title').textContent = a.title;
+      document.getElementById('modal-meta').innerHTML = `
+        <img class="author-avatar" src="${a.avatar}">
+        <span>By <strong>${a.author}</strong> &bull; Published Autumn 2026 &bull; ${a.readTime}</span>
+      `;
+      document.getElementById('modal-body').innerHTML = a.body;
+      document.getElementById('article-modal').classList.add('open');
+    }
+
+    function closeModal(e) {
+      if (e.target.id === 'article-modal') {
+        document.getElementById('article-modal').classList.remove('open');
       }
-    }, 3000);
+    }
+    function closeModalDirect() {
+      document.getElementById('article-modal').classList.remove('open');
+    }
+
+    // Initial render
+    renderArticles();
   </script>
 </body>
 </html>

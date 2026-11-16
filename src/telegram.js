@@ -309,10 +309,6 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
   });
 
   bot.command('relink', async (ctx) => {
-    await ctx.reply(
-      '🔄 <b>Resetting WhatsApp Session...</b>\nGenerating a brand new QR code to ingest your full message history.\nScan the new QR code in <b>Linked Devices</b> once it appears.',
-      getReplyExtra(ctx, { parse_mode: 'HTML' })
-    );
     if (onRelink) {
       await onRelink();
     }

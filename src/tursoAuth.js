@@ -5,6 +5,8 @@ import { initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
  * 
  * Features:
  * - 100% In-Memory Reads: Keys are retrieved at 0ms RAM speed.
+ * - Instant Creds Persistence: Credentials write immediately to Turso so pairing is reliable.
+ * - Clean teardown & cleanup on session resets.
  * - Serialized Background Flush Queue: Never overwhelms Turso with parallel HTTPS requests.
  * - Prevents event-loop starvation and WhatsApp 428 (connectionLost) disconnects.
  * - Completely persists session across restarts to Turso.
@@ -14,6 +16,7 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
   const pendingKeyWrites = new Map();
   let credsDirty = false;
   let isFlushing = false;
+  let isCleanedUp = false;
 
   // 1. Fetch credentials from Turso on startup
   const credsRes = await client.execute({
@@ -30,7 +33,7 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
 
   // Serialized background flush worker
   const flushToTurso = async () => {
-    if (isFlushing) return;
+    if (isCleanedUp || isFlushing) return;
     if (!credsDirty && pendingKeyWrites.size === 0) return;
 
     isFlushing = true;
@@ -48,9 +51,9 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
         });
       }
 
-      // 2. Flush pending keys in clean batches of up to 50 statements
+      // 2. Flush pending keys in batches of up to 150 statements
       if (pendingKeyWrites.size > 0) {
-        const batchKeys = Array.from(pendingKeyWrites.keys()).slice(0, 50);
+        const batchKeys = Array.from(pendingKeyWrites.keys()).slice(0, 150);
         const statements = [];
 
         for (const keyId of batchKeys) {
@@ -78,13 +81,15 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
         }
       }
     } catch (err) {
-      console.warn('⚠️ Turso background sync warning:', err.message);
+      if (!isCleanedUp) {
+        console.warn('⚠️ Turso background sync warning:', err.message);
+      }
     } finally {
       isFlushing = false;
     }
   };
 
-  const flushInterval = setInterval(flushToTurso, 1000);
+  const flushInterval = setInterval(flushToTurso, 800);
   flushInterval.unref();
 
   return {
@@ -112,7 +117,7 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
           }
 
           // 2. Fetch missing keys from Turso only if not in RAM
-          if (missingIds.length > 0) {
+          if (missingIds.length > 0 && !isCleanedUp) {
             try {
               const placeholders = missingIds.map(() => '?').join(',');
               const keyIds = missingIds.map(id => `${type}-${id}`);
@@ -139,6 +144,7 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
           return data;
         },
         set: async (data) => {
+          if (isCleanedUp) return;
           for (const category in data) {
             for (const id in data[category]) {
               const value = data[category][id];
@@ -160,6 +166,27 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
     },
     saveCreds: async () => {
       credsDirty = true;
+      if (isCleanedUp) return;
+      try {
+        const serializedCreds = JSON.stringify(creds, BufferJSON.replacer);
+        await client.execute({
+          sql: `INSERT INTO wa_auth_sessions (session_id, key_id, value, updated_at)
+                VALUES (?, 'creds', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(session_id, key_id) 
+                DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+          args: [sessionId, serializedCreds]
+        });
+        credsDirty = false;
+      } catch (err) {
+        console.warn('Immediate creds flush warning:', err.message);
+      }
+    },
+    cleanup: () => {
+      isCleanedUp = true;
+      clearInterval(flushInterval);
+      memoryCache.clear();
+      pendingKeyWrites.clear();
+      credsDirty = false;
     }
   };
 }
