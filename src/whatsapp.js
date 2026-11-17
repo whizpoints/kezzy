@@ -311,7 +311,7 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
           `💬 <b>WhatsApp Group</b>\n\n` +
           `📌 <i>Pinned Group Info</i>`;
 
-        const card = await retryTelegramCall(() =>
+        let card = await retryTelegramCall(() =>
           bot.telegram.sendPhoto(
             groupId,
             { source: buffer, filename: 'group.jpg' },
@@ -321,7 +321,14 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
               parse_mode: 'HTML'
             }
           ), 2, 800
-        ).catch(() => null);
+        ).catch(async () => {
+          return await uploadTelegramMedia('sendPhoto', {
+            chatId: groupId,
+            topicId,
+            caption,
+            parseMode: 'HTML'
+          }, buffer, 'group.jpg', 'photo').catch(() => null);
+        });
 
         if (card) {
           await bot.telegram.pinChatMessage(groupId, card.message_id, {
@@ -345,7 +352,7 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
       `💬 <b>WhatsApp Direct Chat</b>\n\n` +
       `📌 <i>Pinned Profile Card</i>`;
 
-    const card = await retryTelegramCall(() =>
+    let card = await retryTelegramCall(() =>
       bot.telegram.sendPhoto(
         groupId,
         { source: buffer, filename: 'profile.jpg' },
@@ -355,7 +362,14 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
           parse_mode: 'HTML'
         }
       ), 2, 800
-    ).catch(() => null);
+    ).catch(async () => {
+      return await uploadTelegramMedia('sendPhoto', {
+        chatId: groupId,
+        topicId,
+        caption,
+        parseMode: 'HTML'
+      }, buffer, 'profile.jpg', 'photo').catch(() => null);
+    });
 
     if (card) {
       await bot.telegram.pinChatMessage(groupId, card.message_id, {
@@ -602,15 +616,24 @@ export async function syncAllGroups(sock, bot, groupId) {
 
         const avatarBuffer = await getProfilePictureBuffer(sock, jid);
         if (avatarBuffer) {
-          const card = await bot.telegram.sendPhoto(
-            groupId,
-            { source: avatarBuffer },
-            {
-              message_thread_id: topic.message_thread_id,
+          const card = await retryTelegramCall(() =>
+            bot.telegram.sendPhoto(
+              groupId,
+              { source: avatarBuffer },
+              {
+                message_thread_id: topic.message_thread_id,
+                caption: `📸 <b>${safeTitle}</b>\nGroup ID: <code>${jid}</code>\nMembers: ${meta.participants?.length || 0}`,
+                parse_mode: 'HTML'
+              }
+            ), 2, 800
+          ).catch(async () => {
+            return await uploadTelegramMedia('sendPhoto', {
+              chatId: groupId,
+              topicId: topic.message_thread_id,
               caption: `📸 <b>${safeTitle}</b>\nGroup ID: <code>${jid}</code>\nMembers: ${meta.participants?.length || 0}`,
-              parse_mode: 'HTML'
-            }
-          ).catch(() => null);
+              parseMode: 'HTML'
+            }, avatarBuffer, 'group.jpg', 'photo').catch(() => null);
+          });
 
           if (card) {
             await bot.telegram.pinChatMessage(groupId, card.message_id, {
@@ -914,17 +937,31 @@ export async function initWhatsApp({
             }
           }
 
-          // Send fresh photo with retry
-          const sent = await retryTelegramCall(async () => {
-            return await bot.telegram.sendPhoto(
-              groupId,
-              { source: qrBuffer, filename: 'qr.png' },
-              getTopicExtra(generalTopicId, {
-                caption: captionText,
-                parse_mode: 'HTML'
-              })
-            );
-          }, 2, 800);
+          // Send fresh photo with retry and native multipart upload fallback
+          let sent = null;
+          try {
+            sent = await retryTelegramCall(async () => {
+              return await bot.telegram.sendPhoto(
+                groupId,
+                { source: qrBuffer, filename: 'qr.png' },
+                getTopicExtra(generalTopicId, {
+                  caption: captionText,
+                  parse_mode: 'HTML'
+                })
+              );
+            }, 2, 800);
+          } catch (telegrafErr) {
+            console.warn('Telegraf QR upload failed, falling back to native multipart upload:', telegrafErr.message);
+            sent = await uploadTelegramMedia('sendPhoto', {
+              chatId: groupId,
+              topicId: generalTopicId,
+              caption: captionText,
+              parseMode: 'HTML'
+            }, qrBuffer, 'qr.png', 'photo').catch(e => {
+              console.error('Native QR upload error:', e.message);
+              return null;
+            });
+          }
 
           if (sent?.message_id) {
             connectionStatus.qrMessageId = sent.message_id;
@@ -1316,7 +1353,15 @@ export async function initWhatsApp({
                   parse_mode: 'HTML',
                   reply_markup: replyMarkup
                 })
-              );
+              ).catch(async () => {
+                return await uploadTelegramMedia('sendPhoto', {
+                  chatId: groupId,
+                  topicId,
+                  caption,
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, 'photo.jpg', 'photo').catch(() => null);
+              });
 
               // Mirror photo to dedicated Storage Vault
               await mirrorMediaToStorage(bot, groupId, {
@@ -1356,7 +1401,15 @@ export async function initWhatsApp({
                   parse_mode: 'HTML',
                   reply_markup: replyMarkup
                 })
-              );
+              ).catch(async () => {
+                return await uploadTelegramMedia('sendDocument', {
+                  chatId: groupId,
+                  topicId,
+                  caption,
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, fileName, 'document').catch(() => null);
+              });
 
               // Mirror document to dedicated Storage Vault
               await mirrorMediaToStorage(bot, groupId, {
