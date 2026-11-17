@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS chat_mappings (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_mappings_topic ON chat_mappings(tg_topic_id);
 
--- 3. Message History (For native quoted replies and reference)
+-- 3. Message History (For native quoted replies, media, and retry re-encryption)
 CREATE TABLE IF NOT EXISTS message_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     wa_message_id TEXT,
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS message_history (
     sender_wa_id TEXT,
     content_text TEXT,
     media_type TEXT DEFAULT 'text',
+    raw_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_msg_history_wa_id ON message_history(wa_message_id);

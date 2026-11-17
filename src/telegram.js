@@ -1,5 +1,6 @@
 import https from 'https';
 import { Telegraf } from 'telegraf';
+import { BufferJSON } from '@whiskeysockets/baileys';
 import {
   getMappingByTopicId,
   getMappingByWaId,
@@ -781,18 +782,24 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       });
     }
 
-    // Target WhatsApp JID: For direct chats, WhatsApp routing requires the phone JID (@s.whatsapp.net)
+    // Target WhatsApp JID: Direct chats should use their active mapped JID (LID or phone)
     let targetJid = mapping.wa_id;
     let fallbackJid = null;
 
-    if (!mapping.is_group && targetJid.endsWith('@lid')) {
-      try {
+    if (!mapping.is_group) {
+      if (targetJid.endsWith('@lid')) {
+        // Chat was initiated with an LID; fallback to phone JID if LID fails
         const contact = await getContact(targetJid);
-        if (contact && contact.phone_number) {
-          fallbackJid = targetJid; // Keep LID as fallback
-          targetJid = `${contact.phone_number}@s.whatsapp.net`;
+        if (contact?.phone_number) {
+          fallbackJid = `${contact.phone_number}@s.whatsapp.net`;
         }
-      } catch (_) {}
+      } else if (targetJid.endsWith('@s.whatsapp.net')) {
+        // Chat was initiated with phone JID; fallback to LID if known and phone fails
+        const contact = await getContact(targetJid);
+        if (contact?.lid) {
+          fallbackJid = contact.lid;
+        }
+      }
     }
 
     // 3. Handle Quoted Reply
@@ -983,6 +990,13 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       // Record in message history and cache for retry re-encryption & echo suppression
       if (sentMsg) {
         recordBotSentMessage(sentMsg.key.id, sentMsg.message);
+        let rawMessageStr = null;
+        try {
+          if (sentMsg.message) {
+            rawMessageStr = JSON.stringify(sentMsg.message, BufferJSON.replacer);
+          }
+        } catch (_) {}
+
         await saveMessageHistory({
           waMessageId: sentMsg.key.id,
           tgMessageId: msg.message_id,
@@ -990,7 +1004,8 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
           tgTopicId: topicId,
           senderWaId: 'me',
           contentText,
-          mediaType
+          mediaType,
+          rawMessage: rawMessageStr
         });
         console.log(`📤 Delivered message to WhatsApp (${targetJid}) for topic ${topicId}`);
         await ctx.telegram.setMessageReaction(ctx.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👌' }]).catch(() => {});

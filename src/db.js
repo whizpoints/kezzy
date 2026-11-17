@@ -42,6 +42,11 @@ export async function runMigrations() {
     await client.execute(statement);
   }
 
+  // Ensure raw_message column exists in message_history for retry re-encryption
+  try {
+    await client.execute('ALTER TABLE message_history ADD COLUMN raw_message TEXT;');
+  } catch (_) {}
+
   console.log('✅ Turso database schema verified / migrated successfully.');
 }
 
@@ -158,14 +163,23 @@ export async function updateMappingName(waId, chatName) {
 
 // ================= Message History ================= //
 
-export async function saveMessageHistory({ waMessageId, tgMessageId, waChatId, tgTopicId, senderWaId, contentText, mediaType = 'text' }) {
+export async function saveMessageHistory({
+  waMessageId,
+  tgMessageId,
+  waChatId,
+  tgTopicId,
+  senderWaId,
+  contentText,
+  mediaType = 'text',
+  rawMessage = null
+}) {
   const query = `
-    INSERT INTO message_history (wa_message_id, tg_message_id, wa_chat_id, tg_topic_id, sender_wa_id, content_text, media_type)
-    VALUES (?, ?, ?, ?, ?, ?, ?);
+    INSERT INTO message_history (wa_message_id, tg_message_id, wa_chat_id, tg_topic_id, sender_wa_id, content_text, media_type, raw_message)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
   `;
   const res = await client.execute({
     sql: query,
-    args: [waMessageId, tgMessageId, waChatId, tgTopicId, senderWaId, contentText, mediaType]
+    args: [waMessageId, tgMessageId, waChatId, tgTopicId, senderWaId, contentText, mediaType, rawMessage]
   });
   return { id: res.lastInsertRowid, waMessageId, tgMessageId };
 }

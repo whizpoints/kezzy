@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { initDb, runMigrations, getDb, seedContactsFromFile } from './db.js';
 import { createHealthServer } from './server.js';
 import { initTelegramBot } from './telegram.js';
-import { initWhatsApp, getWaSocket, getWaStatus, relinkWhatsApp, getLatestQr } from './whatsapp.js';
+import { initWhatsApp, getWaSocket, getWaStatus, relinkWhatsApp, getLatestQr, getAuthCleanup } from './whatsapp.js';
 
 // Prevent transient network errors or unhandled rejections from crashing the process
 process.on('unhandledRejection', (reason) => {
@@ -107,6 +107,11 @@ async function main() {
       const sock = getWaSocket();
       if (sock) {
         sock.end();
+      }
+      const authCleanup = getAuthCleanup();
+      if (authCleanup?.flushRemaining) {
+        console.log('💾 Flushing pending session keys to Turso before shutdown...');
+        await authCleanup.flushRemaining();
       }
       const client = getDb();
       if (client && client.close) {

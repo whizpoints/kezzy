@@ -32,8 +32,8 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
   }
 
   // Serialized background flush worker
-  const flushToTurso = async () => {
-    if (isCleanedUp || isFlushing) return;
+  const flushToTurso = async (force = false) => {
+    if ((isCleanedUp && !force) || isFlushing) return;
     if (!credsDirty && pendingKeyWrites.size === 0) return;
 
     isFlushing = true;
@@ -181,9 +181,23 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
         console.warn('Immediate creds flush warning:', err.message);
       }
     },
-    cleanup: () => {
-      isCleanedUp = true;
+    flushRemaining: async () => {
+      let loops = 0;
+      while ((pendingKeyWrites.size > 0 || credsDirty) && loops < 20) {
+        loops++;
+        await flushToTurso(true);
+      }
+    },
+    cleanup: async () => {
       clearInterval(flushInterval);
+      try {
+        let loops = 0;
+        while ((pendingKeyWrites.size > 0 || credsDirty) && loops < 20) {
+          loops++;
+          await flushToTurso(true);
+        }
+      } catch (_) {}
+      isCleanedUp = true;
       memoryCache.clear();
       pendingKeyWrites.clear();
       credsDirty = false;

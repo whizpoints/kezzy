@@ -1,7 +1,10 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers
+  Browsers,
+  makeCacheableSignalKeyStore,
+  BufferJSON,
+  proto
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -86,6 +89,10 @@ export function getWaSocket() {
 
 export function getWaStatus() {
   return connectionStatus;
+}
+
+export function getAuthCleanup() {
+  return activeAuthCleanup;
 }
 
 /**
@@ -777,13 +784,18 @@ export async function initWhatsApp({
 
     if (activeAuthCleanup) {
       try {
-        activeAuthCleanup();
+        if (typeof activeAuthCleanup.cleanup === 'function') {
+          await activeAuthCleanup.cleanup();
+        } else if (typeof activeAuthCleanup === 'function') {
+          activeAuthCleanup();
+        }
       } catch (_) {}
       activeAuthCleanup = null;
     }
 
-    const { state, saveCreds, cleanup } = await useTursoAuthState(client, sessionId);
-    activeAuthCleanup = cleanup;
+    const authData = await useTursoAuthState(client, sessionId);
+    const { state, saveCreds } = authData;
+    activeAuthCleanup = authData;
 
     let version = [2, 3000, 1043857760];
     try {
@@ -797,13 +809,40 @@ export async function initWhatsApp({
 
     const sock = makeWASocket({
       version,
-      auth: state,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+      },
       logger: pino({ level: 'silent' }),
       browser: Browsers.ubuntu('Chrome'),
       msgRetryCounterCache,
       getMessage: async (key) => {
+        if (!key || !key.id) return undefined;
+
+        // 1. Instant RAM lookup (0ms)
         const cached = rawMessageCache.get(key.id);
         if (cached) return cached;
+
+        // 2. Query Turso database message_history for persistent cross-restart retry resolution
+        try {
+          const row = await getMessageHistoryByWaId(key.id);
+          if (row) {
+            if (row.raw_message) {
+              const parsed = JSON.parse(row.raw_message, BufferJSON.reviver);
+              const protoMsg = proto.Message.fromObject(parsed);
+              rawMessageCache.set(key.id, protoMsg);
+              return protoMsg;
+            }
+            if (row.content_text) {
+              const protoMsg = { conversation: row.content_text };
+              rawMessageCache.set(key.id, protoMsg);
+              return protoMsg;
+            }
+          }
+        } catch (err) {
+          console.warn(`⚠️ getMessage DB lookup note for ${key.id}:`, err.message);
+        }
+
         return undefined;
       },
       syncFullHistory: true,
@@ -1464,6 +1503,13 @@ export async function initWhatsApp({
           }
 
           if (sentTgMsg) {
+            let rawMessageStr = null;
+            try {
+              if (m.message) {
+                rawMessageStr = JSON.stringify(m.message, BufferJSON.replacer);
+              }
+            } catch (_) {}
+
             await saveMessageHistory({
               waMessageId: m.key.id,
               tgMessageId: sentTgMsg.message_id,
@@ -1471,7 +1517,8 @@ export async function initWhatsApp({
               tgTopicId: topicId,
               senderWaId: isFromMe ? 'me' : senderJid,
               contentText: bodyText,
-              mediaType
+              mediaType,
+              rawMessage: rawMessageStr
             });
           }
 
@@ -1970,6 +2017,13 @@ export async function initWhatsApp({
         }
 
         if (sentTgMsg) {
+          let rawMessageStr = null;
+          try {
+            if (m.message) {
+              rawMessageStr = JSON.stringify(m.message, BufferJSON.replacer);
+            }
+          } catch (_) {}
+
           await saveMessageHistory({
             waMessageId: m.key.id,
             tgMessageId: sentTgMsg.message_id,
@@ -1977,7 +2031,8 @@ export async function initWhatsApp({
             tgTopicId: topicId,
             senderWaId: isFromMe ? 'me' : senderJid,
             contentText: bodyText,
-            mediaType
+            mediaType,
+            rawMessage: rawMessageStr
           });
         }
       } catch (err) {
