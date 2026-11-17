@@ -731,16 +731,8 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       });
     }
 
-    // Resolve target WhatsApp JID: If mapping is an @lid, prefer verified phone JID for bulletproof WhatsApp encryption
-    let targetJid = mapping.wa_id;
-    if (targetJid.endsWith('@lid')) {
-      try {
-        const contact = await getContact(targetJid);
-        if (contact && contact.phone_number) {
-          targetJid = `${contact.phone_number}@s.whatsapp.net`;
-        }
-      } catch (_) {}
-    }
+    // Target WhatsApp JID is the exact mapped conversation identifier
+    const targetJid = mapping.wa_id;
 
     // 3. Handle Quoted Reply
     let quoted = undefined;

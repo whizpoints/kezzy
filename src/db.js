@@ -208,7 +208,16 @@ export async function saveContact({ waId, name, phoneNumber = null, lid = null }
     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(wa_id) 
     DO UPDATE SET 
-      name = COALESCE(excluded.name, contacts.name),
+      name = CASE 
+        WHEN contacts.name IS NOT NULL 
+             AND contacts.name != '' 
+             AND contacts.name NOT LIKE 'WhatsApp Contact%' 
+             AND contacts.name NOT LIKE 'WhatsApp User%'
+             AND contacts.name NOT LIKE 'Contact %'
+             AND contacts.name NOT LIKE '+%'
+        THEN contacts.name 
+        ELSE COALESCE(excluded.name, contacts.name) 
+      END,
       phone_number = COALESCE(excluded.phone_number, contacts.phone_number),
       lid = COALESCE(excluded.lid, contacts.lid),
       updated_at = CURRENT_TIMESTAMP;
@@ -257,7 +266,14 @@ export async function getContact(jidOrLid) {
     args.push(digits, `${digits}@s.whatsapp.net`, `%${digits}%`);
   }
 
-  query += ` ORDER BY (CASE WHEN name IS NOT NULL AND name != '' THEN 1 ELSE 0 END) DESC, updated_at DESC LIMIT 1`;
+  query += ` ORDER BY 
+    (CASE 
+      WHEN name IS NOT NULL AND name != '' AND name NOT LIKE 'WhatsApp%' AND name NOT LIKE 'Contact %' AND name NOT LIKE '+%' THEN 3
+      WHEN name IS NOT NULL AND name != '' THEN 2
+      ELSE 0 
+    END) DESC,
+    (CASE WHEN wa_id LIKE '%@s.whatsapp.net' THEN 1 ELSE 0 END) DESC,
+    updated_at DESC LIMIT 1`;
 
   const res = await client.execute({ sql: query, args });
   return res.rows[0] || null;

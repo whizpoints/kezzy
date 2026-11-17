@@ -1505,20 +1505,24 @@ export async function initWhatsApp({
       const isGroup = remoteJid.endsWith('@g.us');
       const senderJid = isGroup ? (m.key.participant || m.participant) : remoteJid;
 
-      // Immediately persist any pushName received on this incoming message
+      // Only cache pushName if the sender does not already have a saved address book name
       if (m.pushName && m.pushName.trim()) {
         const cleanPush = m.pushName.trim();
-        await saveContact({
-          waId: senderJid,
-          name: cleanPush,
-          lid: senderJid.endsWith('@lid') ? senderJid : null
-        }).catch(() => {});
-        if (remoteJid !== senderJid) {
+        const existing = await getContact(senderJid);
+        const hasSavedName = existing?.name && !existing.name.startsWith('WhatsApp') && !existing.name.startsWith('Contact ') && !existing.name.startsWith('+') && !/^\d+$/.test(existing.name);
+        if (!hasSavedName) {
           await saveContact({
-            waId: remoteJid,
+            waId: senderJid,
             name: cleanPush,
-            lid: remoteJid.endsWith('@lid') ? remoteJid : null
+            lid: senderJid.endsWith('@lid') ? senderJid : null
           }).catch(() => {});
+          if (remoteJid !== senderJid) {
+            await saveContact({
+              waId: remoteJid,
+              name: cleanPush,
+              lid: remoteJid.endsWith('@lid') ? remoteJid : null
+            }).catch(() => {});
+          }
         }
       }
 
@@ -1566,28 +1570,24 @@ export async function initWhatsApp({
           continue;
         }
       } else {
-        // Upgrade topic name if it's currently generic or missing the real name
+        // Upgrade topic name ONLY if it's currently generic (e.g. WhatsApp Contact, WhatsApp User, or raw digits)
         const currentTitle = mapping.chat_name || '';
         const isGeneric =
           currentTitle.startsWith('WhatsApp Contact') ||
           currentTitle.startsWith('WhatsApp User') ||
+          currentTitle.startsWith('Contact ') ||
           currentTitle.includes('(+0)') ||
           /^\d+$/.test(currentTitle);
 
-        const hasBetterName = isGeneric || (m.pushName && !currentTitle.includes(m.pushName.trim()));
-
-        if (hasBetterName) {
+        if (isGeneric) {
           const resolved = await resolveChatTitle(sock, remoteJid, m.pushName || senderName);
           const safe = sanitizeTopicName(resolved);
-          if (safe !== currentTitle && !/^\d+$/.test(safe)) {
+          if (safe !== currentTitle && !/^\d+$/.test(safe) && !safe.startsWith('WhatsApp Contact') && !safe.startsWith('WhatsApp User')) {
             try {
               await retryTelegramCall(() => bot.telegram.editForumTopic(groupId, mapping.tg_topic_id, { name: safe }), 3, 1000);
               await updateMappingName(remoteJid, safe);
               mapping.chat_name = safe;
               console.log(`✨ Dynamically upgraded topic ${mapping.tg_topic_id} name from "${currentTitle}" to "${safe}"`);
-
-              // Also refresh/pin profile card
-              await ensurePinnedProfileCard(sock, bot, groupId, mapping.tg_topic_id, remoteJid, safe).catch(() => {});
             } catch (err) {
               if (!err.message?.includes('TOPIC_NOT_MODIFIED')) {
                 console.warn(`Could not rename topic ${mapping.tg_topic_id}:`, err.message);
