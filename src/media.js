@@ -1,4 +1,4 @@
-import { downloadMediaMessage, extractMessageContent } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, extractMessageContent, downloadContentFromMessage } from '@whiskeysockets/baileys';
 
 /**
  * Unwrap nested WhatsApp messages (ephemeral, viewOnce, documentWithCaption, etc.)
@@ -74,7 +74,7 @@ export function sanitizeTopicName(name) {
 }
 
 /**
- * Safely download media buffer from a Baileys message with automatic re-upload support
+ * Safely download media buffer from a Baileys message with automatic re-upload support & direct stream fallback
  */
 export async function downloadWaMedia(msg, sock = null) {
   try {
@@ -87,23 +87,65 @@ export async function downloadWaMedia(msg, sock = null) {
       message: unwrapped
     };
 
-    const buffer = await downloadMediaMessage(
-      mediaMessage,
-      'buffer',
-      { timeout: 35000 },
-      {
-        reuploadRequest: sock ? async (m) => {
-          try {
-            console.log(`🔄 Requesting WhatsApp media re-upload for ${m.key?.id}...`);
-            return await sock.updateMediaMessage(m);
-          } catch (reErr) {
-            console.warn(`Media re-upload failed for ${m.key?.id}:`, reErr.message);
-            return m;
+    // Strategy 1: Baileys downloadMediaMessage with logger & re-upload
+    try {
+      const buffer = await downloadMediaMessage(
+        mediaMessage,
+        'buffer',
+        { timeout: 35000 },
+        {
+          logger: {
+            info: () => {},
+            warn: () => {},
+            error: () => {},
+            debug: () => {},
+            trace: () => {}
+          },
+          reuploadRequest: sock ? async (m) => {
+            try {
+              console.log(`🔄 Requesting WhatsApp media re-upload for ${m.key?.id}...`);
+              return await sock.updateMediaMessage(m);
+            } catch (reErr) {
+              console.warn(`Media re-upload failed for ${m.key?.id}:`, reErr.message);
+              return m;
+            }
+          } : undefined
+        }
+      );
+      if (buffer && buffer.length > 0) return buffer;
+    } catch (primaryErr) {
+      console.warn(`Primary media download note (${primaryErr.message}). Attempting direct stream fallback...`);
+    }
+
+    // Strategy 2: Direct stream extraction via downloadContentFromMessage
+    const contentType = Object.keys(unwrapped).find(k => k.endsWith('Message') && k !== 'extendedTextMessage' && k !== 'conversation');
+    if (contentType) {
+      const mediaObj = unwrapped[contentType];
+      const type = contentType.replace('Message', '').toLowerCase();
+      const validTypes = {
+        image: 'image',
+        document: 'document',
+        audio: 'audio',
+        video: 'video',
+        sticker: 'sticker'
+      };
+      const streamType = validTypes[type] || 'document';
+      if (mediaObj && (mediaObj.url || mediaObj.directPath) && mediaObj.mediaKey) {
+        try {
+          const stream = await downloadContentFromMessage(mediaObj, streamType, { timeout: 30000 });
+          const chunks = [];
+          for await (const chunk of stream) {
+            chunks.push(chunk);
           }
-        } : undefined
+          const directBuf = Buffer.concat(chunks);
+          if (directBuf && directBuf.length > 0) return directBuf;
+        } catch (directErr) {
+          console.warn(`Direct stream download failed:`, directErr.message);
+        }
       }
-    );
-    return buffer;
+    }
+
+    return null;
   } catch (err) {
     console.error('Error downloading WhatsApp media:', err.message);
     return null;

@@ -1612,6 +1612,18 @@ export async function initWhatsApp({
               senderName: isFromMe ? 'You' : senderName,
               timeStr: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
             }).catch(() => {});
+          } else {
+            sentTgMsg = await sendWithTopicRecovery((tid) =>
+              bot.telegram.sendMessage(
+                groupId,
+                `${prefix}📷 <i>[Photo - WhatsApp media stream pending or unavailable]</i>\n${escapeHtml(bodyText)}`.trim(),
+                {
+                  message_thread_id: tid,
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
+                }
+              )
+            );
           }
         }
         // --- 3. Document / PDF / File ---
@@ -1644,6 +1656,19 @@ export async function initWhatsApp({
               senderName: isFromMe ? 'You' : senderName,
               timeStr: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
             }).catch(() => {});
+          } else {
+            const fileSize = doc.fileLength ? ` (${Math.round(doc.fileLength / 1024)} KB)` : '';
+            sentTgMsg = await sendWithTopicRecovery((tid) =>
+              bot.telegram.sendMessage(
+                groupId,
+                `${prefix}📄 <b>[Document: ${escapeHtml(fileName)}${fileSize}]</b>\n⚠️ <i>WhatsApp media stream pending or unavailable</i>\n${escapeHtml(bodyText)}`.trim(),
+                {
+                  message_thread_id: tid,
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
+                }
+              )
+            );
           }
         }
         // --- 4. Audio / Voice Note ---
@@ -1689,6 +1714,18 @@ export async function initWhatsApp({
               senderName: isFromMe ? 'You' : senderName,
               timeStr: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
             }).catch(() => {});
+          } else {
+            sentTgMsg = await sendWithTopicRecovery((tid) =>
+              bot.telegram.sendMessage(
+                groupId,
+                `${prefix}🎤 <i>[Voice/Audio - WhatsApp media stream pending or unavailable]</i>`,
+                {
+                  message_thread_id: tid,
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
+                }
+              )
+            );
           }
         }
         // --- 5. Video Message ---
@@ -1719,6 +1756,18 @@ export async function initWhatsApp({
               senderName: isFromMe ? 'You' : senderName,
               timeStr: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
             }).catch(() => {});
+          } else {
+            sentTgMsg = await sendWithTopicRecovery((tid) =>
+              bot.telegram.sendMessage(
+                groupId,
+                `${prefix}🎥 <i>[Video - WhatsApp media stream pending or unavailable]</i>\n${escapeHtml(bodyText)}`.trim(),
+                {
+                  message_thread_id: tid,
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
+                }
+              )
+            );
           }
         }
         // --- 6. Sticker Message ---
