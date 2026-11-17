@@ -275,6 +275,22 @@ export function createHealthServer(getStatus, getQrData) {
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Modern blog & health service listening on port ${PORT} (0.0.0.0)`);
+
+    // Keep Render Free Tier awake by self-pinging the public router every 8 minutes
+    const externalUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
+    if (externalUrl) {
+      console.log(`⏰ Initializing anti-sleep keep-alive pinger for: ${externalUrl}`);
+      setInterval(async () => {
+        try {
+          const res = await fetch(`${externalUrl.replace(/\/$/, '')}/health`);
+          if (res.ok) {
+            console.log('💓 Anti-sleep heartbeat ping successful');
+          }
+        } catch (pingErr) {
+          console.warn('Anti-sleep heartbeat ping note:', pingErr.message);
+        }
+      }, 8 * 60 * 1000); // Every 8 minutes (Render sleeps at 15 mins)
+    }
   });
 
   return server;

@@ -789,7 +789,7 @@ export async function initWhatsApp({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.ubuntu('Chrome'),
+      browser: Browsers.windows('Desktop'),
       msgRetryCounterCache,
       getMessage: async (key) => {
         const cached = rawMessageCache.get(key.id);
