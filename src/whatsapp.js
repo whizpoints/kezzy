@@ -20,7 +20,8 @@ import {
   getAllMappings,
   updateMappingName,
   getContactsWithPhone,
-  updateContactLid
+  updateContactLid,
+  seedContactsFromFile
 } from './db.js';
 import { sanitizeTopicName, downloadWaMedia, getProfilePictureBuffer, unwrapWaMessage, parseVCard } from './media.js';
 
@@ -203,41 +204,73 @@ export async function resolveChatTitle(sock, jid, pushName = null) {
 
   // 4. Look up contact in DB (resolves phone numbers, saved names, and privacy @lid)
   const contact = await getContact(jid);
-  if (contact) {
-    const rawPhone = contact.phone_number || (!contact.wa_id?.includes('@lid') ? contact.wa_id?.split('@')[0]?.split(':')[0] : '');
-    const validPhone = rawPhone && rawPhone.length >= 7 && !rawPhone.includes('@') && rawPhone !== '0' ? ` (+${rawPhone})` : '';
+  const dbName = contact?.name && contact.name.trim();
+  const dbPhone = contact?.phone_number || (!contact?.wa_id?.includes('@lid') ? contact?.wa_id?.split('@')[0]?.split(':')[0] : null);
+  const validPhone = dbPhone && dbPhone.length >= 7 && !dbPhone.includes('@') && dbPhone !== '0' ? ` (+${dbPhone})` : '';
 
-    if (contact.name && contact.name.trim()) {
-      return `${contact.name.trim()}${validPhone}`;
-    }
-    if (pushName && pushName.trim()) {
-      return `${pushName.trim()}${validPhone}`;
-    }
-    if (validPhone) {
-      return `Contact${validPhone}`;
-    }
+  if (dbName && !dbName.startsWith('WhatsApp Contact') && !dbName.startsWith('WhatsApp User') && !/^\d+$/.test(dbName)) {
+    return `${dbName}${validPhone}`;
   }
 
-  // 5. If it's a standard phone JID
+  // 5. If pushName is provided, persist it and use it
+  if (pushName && pushName.trim() && !pushName.startsWith('WhatsApp Contact') && !pushName.startsWith('WhatsApp User')) {
+    const cleanPush = pushName.trim();
+    try {
+      await saveContact({
+        waId: jid,
+        name: cleanPush,
+        phoneNumber: dbPhone,
+        lid: jid.endsWith('@lid') ? jid : (contact?.lid || null)
+      });
+    } catch (_) {}
+    return `${cleanPush}${validPhone}`;
+  }
+
+  // 6. Query WhatsApp Real APIs for unmapped user (Business profile, status / bio)
+  if (sock && jid) {
+    // 6a. WhatsApp Business Profile (name, verified title, or category)
+    try {
+      const biz = await sock.getBusinessProfile(jid);
+      if (biz?.name && biz.name.trim()) {
+        const bName = biz.name.trim();
+        await saveContact({ waId: jid, name: bName, phoneNumber: dbPhone, lid: jid.endsWith('@lid') ? jid : null }).catch(() => {});
+        return `${bName}${validPhone}`;
+      }
+      if (biz?.description && biz.description.trim() && biz.description.length < 35) {
+        return `${biz.description.trim()}${validPhone}`;
+      }
+    } catch (_) {}
+
+    // 6b. WhatsApp Status / Bio (About)
+    try {
+      const stList = await sock.fetchStatus(jid);
+      const stItem = stList?.[0]?.status;
+      const stText = typeof stItem === 'string' ? stItem : stItem?.status;
+      if (stText && stText.trim() && stText.length > 2 && stText.length < 35 && !stText.startsWith('http')) {
+        return `${stText.trim()}${validPhone}`;
+      }
+    } catch (_) {}
+  }
+
+  // 7. If standard phone JID, show clean formatted phone number
   if (jid.endsWith('@s.whatsapp.net')) {
     const phone = jid.split('@')[0]?.split(':')[0];
     if (phone && phone.length >= 7 && phone !== '0') {
-      const namePart = pushName && pushName.trim() ? `${pushName.trim()} ` : '';
-      return `${namePart}(+${phone})`.trim();
+      return `+${phone}`;
     }
   }
 
-  // 6. Push name fallback
-  if (pushName && pushName.trim()) {
-    return pushName.trim();
+  // 8. If contact has a known phone number in DB
+  if (dbPhone && dbPhone.length >= 7 && dbPhone !== '0') {
+    return `+${dbPhone}`;
   }
 
-  // 7. Fallback for unmapped LID
+  // 9. Fallback for unmapped LID
   if (jid.endsWith('@lid')) {
-    return `WhatsApp Contact (${cleanId.slice(-4)})`;
+    return `WhatsApp User (${cleanId.slice(-4)})`;
   }
 
-  return cleanId && cleanId.length < 12 ? cleanId : 'WhatsApp Contact';
+  return cleanId && cleanId.length < 15 ? `+${cleanId}` : 'WhatsApp Contact';
 }
 
 /**
@@ -260,9 +293,38 @@ export async function resyncContactsAndAppState(sock) {
  */
 export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId, chatName) {
   if (!bot || !groupId || !topicId || !waId) return;
-  if (waId === '__storage_media__' || waId === '0@s.whatsapp.net' || waId.endsWith('@g.us')) return;
+  if (waId === '__storage_media__' || waId === '0@s.whatsapp.net') return;
 
   try {
+    if (waId.endsWith('@g.us')) {
+      const buffer = await getProfilePictureBuffer(sock, waId, chatName);
+      if (buffer) {
+        const caption =
+          `👥 <b>${escapeHtml(chatName)}</b>\n` +
+          `💬 <b>WhatsApp Group</b>\n\n` +
+          `📌 <i>Pinned Group Info</i>`;
+
+        const card = await retryTelegramCall(() =>
+          bot.telegram.sendPhoto(
+            groupId,
+            { source: buffer, filename: 'group.jpg' },
+            {
+              message_thread_id: topicId,
+              caption,
+              parse_mode: 'HTML'
+            }
+          ), 2, 800
+        ).catch(() => null);
+
+        if (card) {
+          await bot.telegram.pinChatMessage(groupId, card.message_id, {
+            disable_notification: true
+          }).catch(() => {});
+        }
+      }
+      return;
+    }
+
     const contact = await getContact(waId);
     const name = contact?.name || chatName.replace(/\s*\(\+.*\)/, '') || 'WhatsApp Contact';
     const phone = contact?.phone_number || (waId.includes('@s.whatsapp.net') ? waId.split('@')[0] : null);
@@ -276,14 +338,16 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
       `💬 <b>WhatsApp Direct Chat</b>\n\n` +
       `📌 <i>Pinned Profile Card</i>`;
 
-    const card = await bot.telegram.sendPhoto(
-      groupId,
-      { source: buffer, filename: 'profile.jpg' },
-      {
-        message_thread_id: topicId,
-        caption,
-        parse_mode: 'HTML'
-      }
+    const card = await retryTelegramCall(() =>
+      bot.telegram.sendPhoto(
+        groupId,
+        { source: buffer, filename: 'profile.jpg' },
+        {
+          message_thread_id: topicId,
+          caption,
+          parse_mode: 'HTML'
+        }
+      ), 2, 800
     ).catch(() => null);
 
     if (card) {
@@ -1050,21 +1114,9 @@ export async function initWhatsApp({
 
     if (!messages || messages.length === 0) return;
 
-    // Helper for sending history with rate limit retry
+    // Helper for sending history with full network error & rate limit retry
     const sendWithRetry = async (fn, maxRetries = 3) => {
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          return await fn();
-        } catch (err) {
-          if (err.parameters?.retry_after && attempt < maxRetries) {
-            const waitSec = err.parameters.retry_after + 1;
-            console.log(`⏳ Telegram rate limit. Pausing ${waitSec}s before retrying...`);
-            await new Promise(r => setTimeout(r, waitSec * 1000));
-            continue;
-          }
-          throw err;
-        }
-      }
+      return await retryTelegramCall(fn, maxRetries, 1000);
     };
 
     // 31 days cutoff timestamp
@@ -1452,6 +1504,24 @@ export async function initWhatsApp({
 
       const isGroup = remoteJid.endsWith('@g.us');
       const senderJid = isGroup ? (m.key.participant || m.participant) : remoteJid;
+
+      // Immediately persist any pushName received on this incoming message
+      if (m.pushName && m.pushName.trim()) {
+        const cleanPush = m.pushName.trim();
+        await saveContact({
+          waId: senderJid,
+          name: cleanPush,
+          lid: senderJid.endsWith('@lid') ? senderJid : null
+        }).catch(() => {});
+        if (remoteJid !== senderJid) {
+          await saveContact({
+            waId: remoteJid,
+            name: cleanPush,
+            lid: remoteJid.endsWith('@lid') ? remoteJid : null
+          }).catch(() => {});
+        }
+      }
+
       const senderName = await resolveSenderDisplayName(senderJid, m.pushName);
 
       // 1. Find or create Forum Topic
@@ -1473,7 +1543,7 @@ export async function initWhatsApp({
         }
 
         try {
-          const topic = await bot.telegram.createForumTopic(groupId, safeTitle);
+          const topic = await retryTelegramCall(() => bot.telegram.createForumTopic(groupId, safeTitle), 3, 1000);
           mapping = await saveMapping({
             waId: remoteJid,
             topicId: topic.message_thread_id,
@@ -1496,17 +1566,33 @@ export async function initWhatsApp({
           continue;
         }
       } else {
-        // Upgrade topic name if it's currently digits
-        if (/^\d+$/.test(mapping.chat_name) || mapping.chat_name.includes('(+0)')) {
-          const resolved = await resolveChatTitle(sock, remoteJid, senderName);
+        // Upgrade topic name if it's currently generic or missing the real name
+        const currentTitle = mapping.chat_name || '';
+        const isGeneric =
+          currentTitle.startsWith('WhatsApp Contact') ||
+          currentTitle.startsWith('WhatsApp User') ||
+          currentTitle.includes('(+0)') ||
+          /^\d+$/.test(currentTitle);
+
+        const hasBetterName = isGeneric || (m.pushName && !currentTitle.includes(m.pushName.trim()));
+
+        if (hasBetterName) {
+          const resolved = await resolveChatTitle(sock, remoteJid, m.pushName || senderName);
           const safe = sanitizeTopicName(resolved);
-          if (safe !== mapping.chat_name && !/^\d+$/.test(safe)) {
+          if (safe !== currentTitle && !/^\d+$/.test(safe)) {
             try {
-              await bot.telegram.editForumTopic(groupId, mapping.tg_topic_id, { name: safe });
+              await retryTelegramCall(() => bot.telegram.editForumTopic(groupId, mapping.tg_topic_id, { name: safe }), 3, 1000);
               await updateMappingName(remoteJid, safe);
               mapping.chat_name = safe;
-              console.log(`✨ Dynamically upgraded topic ${mapping.tg_topic_id} name to "${safe}"`);
-            } catch (_) {}
+              console.log(`✨ Dynamically upgraded topic ${mapping.tg_topic_id} name from "${currentTitle}" to "${safe}"`);
+
+              // Also refresh/pin profile card
+              await ensurePinnedProfileCard(sock, bot, groupId, mapping.tg_topic_id, remoteJid, safe).catch(() => {});
+            } catch (err) {
+              if (!err.message?.includes('TOPIC_NOT_MODIFIED')) {
+                console.warn(`Could not rename topic ${mapping.tg_topic_id}:`, err.message);
+              }
+            }
           }
         }
       }
@@ -1527,16 +1613,16 @@ export async function initWhatsApp({
 
         const msgContent = unwrapped;
 
-        // Self-healing topic recovery wrapper
+        // Self-healing topic recovery wrapper with full retry on network glitches
         const sendWithTopicRecovery = async (sendFn) => {
           try {
-            return await sendFn(topicId);
+            return await retryTelegramCall(() => sendFn(topicId), 3, 1000);
           } catch (err) {
             if (err.description?.includes('message thread not found') || err.message?.includes('message thread not found')) {
               console.log(`⚠️ Topic ${topicId} for ${remoteJid} was deleted in Telegram. Recreating topic...`);
               const resolvedTitle = await resolveChatTitle(sock, remoteJid, senderName);
               const safeTitle = sanitizeTopicName(resolvedTitle);
-              const newTopic = await bot.telegram.createForumTopic(groupId, safeTitle);
+              const newTopic = await retryTelegramCall(() => bot.telegram.createForumTopic(groupId, safeTitle), 3, 1000);
               const newTopicId = newTopic.message_thread_id;
 
               try {
@@ -1552,13 +1638,11 @@ export async function initWhatsApp({
                 console.warn('Warning: Failed to update mapping in Turso during recovery:', dbErr.message);
               }
 
-              if (mapping.is_announcement && !mapping.is_admin) {
-                await bot.telegram.closeForumTopic(groupId, newTopicId).catch(() => {});
-              }
+              mapping.tg_topic_id = newTopicId;
+              mapping.chat_name = safeTitle;
+              await ensurePinnedProfileCard(sock, bot, groupId, newTopicId, remoteJid, safeTitle).catch(() => {});
 
-              await ensurePinnedProfileCard(sock, bot, groupId, newTopicId, remoteJid, safeTitle);
-
-              return await sendFn(newTopicId);
+              return await retryTelegramCall(() => sendFn(newTopicId), 3, 1000);
             }
             throw err;
           }
@@ -2023,16 +2107,16 @@ export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bo
     console.warn('Error deleting existing Telegram topics:', err.message);
   }
 
-  // 4. Wipe all database tables clean
+  // 4. Reset WhatsApp session and topics, but preserve and verify address book
   try {
     await client.execute({
       sql: 'DELETE FROM wa_auth_sessions WHERE session_id = ?',
       args: [sessionId]
     });
     await client.execute('DELETE FROM chat_mappings');
-    await client.execute('DELETE FROM contacts');
     await client.execute('DELETE FROM message_history');
-    console.log('✅ Database tables wiped completely clean.');
+    await seedContactsFromFile();
+    console.log('✅ Session and topics reset; contacts address book verified and preserved.');
   } catch (err) {
     console.warn('Error clearing Turso tables on relink:', err.message);
   }
@@ -2042,8 +2126,9 @@ export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bo
     await retryTelegramCall(async () => {
       await bot.telegram.sendMessage(
         groupId,
-        '🔄 <b>Full Reset & Fresh Relink:</b>\n\n' +
-        '• All contacts and forum topics have been wiped clean.\n' +
+        '🔄 <b>Fresh Relink Initialized:</b>\n\n' +
+        '• WhatsApp session and forum topics have been reset.\n' +
+        '• Address book contacts are preserved.\n' +
         '• Generating a fresh pairing QR code below.\n\n' +
         '📱 Scan the QR code in <b>WhatsApp > Linked Devices</b> to link fresh.\n' +
         '🌐 <b>Live Web View:</b> https://kezzy.onrender.com/qr',

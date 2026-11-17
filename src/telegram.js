@@ -71,12 +71,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
   const bot = new Telegraf(botToken, {
     telegram: {
       agent: new https.Agent({
-        keepAlive: true,
-        keepAliveMsecs: 10000,
-        timeout: 60000
-      }),
-      attachmentAgent: new https.Agent({
-        keepAlive: false // Do not reuse keep-alive sockets for file/photo uploads to prevent socket hang up
+        keepAlive: false // Disabling keepAlive prevents Telegram server socket hang up / ECONNRESET on large media & documents
       })
     }
   });

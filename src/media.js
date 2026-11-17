@@ -1,4 +1,5 @@
 import { downloadMediaMessage, extractMessageContent, downloadContentFromMessage } from '@whiskeysockets/baileys';
+import { getContact } from './db.js';
 
 /**
  * Unwrap nested WhatsApp messages (ephemeral, viewOnce, documentWithCaption, etc.)
@@ -179,29 +180,45 @@ export function escapeHtml(text) {
  * Fetch WhatsApp Profile Picture Buffer for a contact or group with stylish avatar fallback
  */
 export async function getProfilePictureBuffer(sock, jid, contactName = 'WhatsApp Contact', phoneNumber = null) {
-  // 1. Prioritize real Phone JID or Group JID over anonymous @lid
+  // 1. Resolve candidate JIDs (prioritizing real Phone JID or Group JID over anonymous @lid)
   const candidateJids = [];
-  if (phoneNumber) {
-    const cleanPhone = String(phoneNumber).replace(/[^\d]/g, '');
-    if (cleanPhone) candidateJids.push(`${cleanPhone}@s.whatsapp.net`);
+  let phone = phoneNumber ? String(phoneNumber).replace(/[^\d]/g, '') : null;
+
+  if (!phone && jid && (jid.endsWith('@lid') || !jid.includes('@'))) {
+    try {
+      const contact = await getContact(jid);
+      if (contact?.phone_number) {
+        phone = String(contact.phone_number).replace(/[^\d]/g, '');
+      }
+    } catch (_) {}
   }
-  if (jid) candidateJids.push(jid);
+
+  if (phone) {
+    candidateJids.push(`${phone}@s.whatsapp.net`);
+  }
+  if (jid) {
+    candidateJids.push(jid);
+  }
+
+  const uniqueJids = Array.from(new Set(candidateJids));
 
   if (sock) {
-    for (const targetJid of candidateJids) {
-      try {
-        const url = await sock.profilePictureUrl(targetJid, 'image');
-        if (url) {
-          const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
-          if (response.ok) {
-            const arrayBuffer = await response.arrayBuffer();
-            if (arrayBuffer.byteLength > 0) {
-              console.log(`📸 Fetched real WhatsApp profile picture for ${targetJid}`);
-              return Buffer.from(arrayBuffer);
+    for (const targetJid of uniqueJids) {
+      for (const pictureType of ['image', 'preview']) {
+        try {
+          const url = await sock.profilePictureUrl(targetJid, pictureType);
+          if (url) {
+            const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+            if (response.ok) {
+              const arrayBuffer = await response.arrayBuffer();
+              if (arrayBuffer.byteLength > 0) {
+                console.log(`📸 Fetched real WhatsApp profile picture (${pictureType}) for ${targetJid}`);
+                return Buffer.from(arrayBuffer);
+              }
             }
           }
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
     }
   }
 
