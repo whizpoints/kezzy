@@ -1184,8 +1184,8 @@ export async function initWhatsApp({
             isGroup
           });
 
-          // Fetch & pin profile photo card
-          await ensurePinnedProfileCard(sock, bot, groupId, topic.message_thread_id, chatJid, safeTitle);
+          // Fetch & pin profile photo card asynchronously
+          ensurePinnedProfileCard(sock, bot, groupId, topic.message_thread_id, chatJid, safeTitle).catch(() => {});
 
           await new Promise(r => setTimeout(r, 600));
         } catch (err) {
@@ -1561,8 +1561,8 @@ export async function initWhatsApp({
             await bot.telegram.closeForumTopic(groupId, mapping.tg_topic_id).catch(() => {});
           }
 
-          // Fetch & pin profile photo card
-          await ensurePinnedProfileCard(sock, bot, groupId, topic.message_thread_id, remoteJid, safeTitle);
+          // Fetch & pin profile photo card asynchronously in background
+          ensurePinnedProfileCard(sock, bot, groupId, topic.message_thread_id, remoteJid, safeTitle).catch(() => {});
 
           console.log(`✨ Created new Telegram Topic "${safeTitle}" for ${remoteJid}`);
         } catch (err) {
@@ -1686,7 +1686,20 @@ export async function initWhatsApp({
                   reply_markup: replyMarkup
                 }
               )
-            );
+            ).catch(async (photoErr) => {
+              console.warn('Failed to upload photo binary to Telegram, falling back to text:', photoErr.message);
+              return await sendWithTopicRecovery((tid) =>
+                bot.telegram.sendMessage(
+                  groupId,
+                  `${prefix}📷 <b>[Photo]</b>\n${escapeHtml(bodyText)}`.trim(),
+                  {
+                    message_thread_id: tid,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  }
+                )
+              );
+            });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'image',
               buffer,
@@ -1716,6 +1729,7 @@ export async function initWhatsApp({
           const doc = msgContent.documentMessage;
           bodyText = doc.caption || '';
           const fileName = doc.fileName || 'document';
+          const fileSize = doc.fileLength ? ` (${Math.round(doc.fileLength / 1024)} KB)` : '';
           const buffer = await downloadWaMedia(m, sock);
           const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'document', groupId, storageTopicId);
           if (buffer) {
@@ -1730,7 +1744,20 @@ export async function initWhatsApp({
                   reply_markup: replyMarkup
                 }
               )
-            );
+            ).catch(async (docErr) => {
+              console.warn('Failed to upload document binary to Telegram, falling back to text:', docErr.message);
+              return await sendWithTopicRecovery((tid) =>
+                bot.telegram.sendMessage(
+                  groupId,
+                  `${prefix}📄 <b>[Document: ${escapeHtml(fileName)}${fileSize}]</b>\n${escapeHtml(bodyText)}`.trim(),
+                  {
+                    message_thread_id: tid,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  }
+                )
+              );
+            });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'document',
               buffer,
@@ -1741,7 +1768,6 @@ export async function initWhatsApp({
               timeStr: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
             }).catch(() => {});
           } else {
-            const fileSize = doc.fileLength ? ` (${Math.round(doc.fileLength / 1024)} KB)` : '';
             sentTgMsg = await sendWithTopicRecovery((tid) =>
               bot.telegram.sendMessage(
                 groupId,

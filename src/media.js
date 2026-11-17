@@ -93,7 +93,7 @@ export async function downloadWaMedia(msg, sock = null) {
       const buffer = await downloadMediaMessage(
         mediaMessage,
         'buffer',
-        { timeout: 35000 },
+        { timeout: 12000 },
         {
           logger: {
             info: () => {},
@@ -133,7 +133,7 @@ export async function downloadWaMedia(msg, sock = null) {
       const streamType = validTypes[type] || 'document';
       if (mediaObj && (mediaObj.url || mediaObj.directPath) && mediaObj.mediaKey) {
         try {
-          const stream = await downloadContentFromMessage(mediaObj, streamType, { timeout: 30000 });
+          const stream = await downloadContentFromMessage(mediaObj, streamType, { timeout: 8000 });
           const chunks = [];
           for await (const chunk of stream) {
             chunks.push(chunk);
@@ -206,9 +206,12 @@ export async function getProfilePictureBuffer(sock, jid, contactName = 'WhatsApp
     for (const targetJid of uniqueJids) {
       for (const pictureType of ['image', 'preview']) {
         try {
-          const url = await sock.profilePictureUrl(targetJid, pictureType);
+          const url = await Promise.race([
+            sock.profilePictureUrl(targetJid, pictureType),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+          ]);
           if (url) {
-            const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+            const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
             if (response.ok) {
               const arrayBuffer = await response.arrayBuffer();
               if (arrayBuffer.byteLength > 0) {

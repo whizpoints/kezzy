@@ -71,7 +71,9 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
   const bot = new Telegraf(botToken, {
     telegram: {
       agent: new https.Agent({
-        keepAlive: false // Disabling keepAlive prevents Telegram server socket hang up / ECONNRESET on large media & documents
+        keepAlive: true,
+        keepAliveMsecs: 10000,
+        timeout: 60000
       })
     }
   });
@@ -588,9 +590,19 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
     const msg = ctx.message;
     const topicId = msg.message_thread_id;
 
-    // Ignore bot's own messages and service events (topic created/edited, pins, member joins)
+    // Check sender identity: allow group administrators posting anonymously or as group
+    const myBotId = ctx.botInfo?.id || botInstance?.botInfo?.id;
+    const isSelfBot = myBotId && msg.from?.id === myBotId;
+    const isAnonymousAdmin =
+      msg.sender_chat?.id?.toString() === currentGroupId ||
+      msg.from?.username === 'GroupAnonymousBot' ||
+      msg.from?.id === 1087968824;
+    const isOtherBot = msg.from?.is_bot && !isAnonymousAdmin;
+
+    // Ignore bot's own messages, third-party bots, and service events
     if (
-      msg.from?.is_bot ||
+      isSelfBot ||
+      isOtherBot ||
       msg.forum_topic_created ||
       msg.forum_topic_edited ||
       msg.forum_topic_closed ||
@@ -731,23 +743,36 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       });
     }
 
-    // Target WhatsApp JID is the exact mapped conversation identifier
-    const targetJid = mapping.wa_id;
+    // Target WhatsApp JID: For direct chats, WhatsApp routing requires the phone JID (@s.whatsapp.net)
+    let targetJid = mapping.wa_id;
+    let fallbackJid = null;
+
+    if (!mapping.is_group && targetJid.endsWith('@lid')) {
+      try {
+        const contact = await getContact(targetJid);
+        if (contact && contact.phone_number) {
+          fallbackJid = targetJid; // Keep LID as fallback
+          targetJid = `${contact.phone_number}@s.whatsapp.net`;
+        }
+      } catch (_) {}
+    }
 
     // 3. Handle Quoted Reply
     let quoted = undefined;
     if (msg.reply_to_message) {
-      const historyItem = await getMessageHistoryByTgId(msg.reply_to_message.message_id);
-      if (historyItem && historyItem.wa_message_id) {
-        quoted = {
-          key: {
-            remoteJid: targetJid,
-            id: historyItem.wa_message_id,
-            fromMe: false
-          },
-          message: { conversation: historyItem.content_text || '' }
-        };
-      }
+      try {
+        const historyItem = await getMessageHistoryByTgId(msg.reply_to_message.message_id);
+        if (historyItem && historyItem.wa_message_id) {
+          quoted = {
+            key: {
+              remoteJid: historyItem.wa_chat_id || targetJid,
+              id: historyItem.wa_message_id,
+              fromMe: historyItem.sender_wa_id === 'me'
+            },
+            message: { conversation: historyItem.content_text || '' }
+          };
+        }
+      } catch (_) {}
     }
 
     // Helper for transient timeout retry when sending to WhatsApp
@@ -767,6 +792,35 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       }
     };
 
+    // Helper to send to targetJid with fallback to mapping.wa_id
+    const executeWaSend = async (buildPayload) => {
+      const candidates = [targetJid];
+      if (fallbackJid && fallbackJid !== targetJid) {
+        candidates.push(fallbackJid);
+      }
+
+      let lastErr = null;
+      for (const destJid of candidates) {
+        try {
+          const payload = buildPayload();
+          return await sendWithWaRetry(() => sock.sendMessage(destJid, payload, { quoted }));
+        } catch (err) {
+          lastErr = err;
+          // If quoted failed, try without quoted
+          if (quoted) {
+            try {
+              const payload = buildPayload();
+              return await sendWithWaRetry(() => sock.sendMessage(destJid, payload));
+            } catch (err2) {
+              lastErr = err2;
+            }
+          }
+          console.warn(`Failed sending to ${destJid}:`, err.message);
+        }
+      }
+      throw lastErr;
+    };
+
     try {
       let sentMsg = null;
       let mediaType = 'text';
@@ -774,9 +828,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
 
       // --- TEXT MESSAGE ---
       if (msg.text) {
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(targetJid, { text: msg.text }, { quoted })
-        );
+        sentMsg = await executeWaSend(() => ({ text: msg.text }));
       }
       // --- PHOTO ---
       else if (msg.photo && msg.photo.length > 0) {
@@ -785,13 +837,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         const fileLink = await ctx.telegram.getFileLink(bestPhoto.file_id);
         const buffer = await downloadTelegramFile(fileLink.href);
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            { image: buffer, caption: msg.caption || '' },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({ image: buffer, caption: msg.caption || '' }));
       }
       // --- DOCUMENT / FILE (PDF, DOCX, ZIP, etc.) ---
       else if (msg.document) {
@@ -800,18 +846,12 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         const fileLink = await ctx.telegram.getFileLink(doc.file_id);
         const buffer = await downloadTelegramFile(fileLink.href);
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            {
-              document: buffer,
-              mimetype: doc.mime_type || 'application/octet-stream',
-              fileName: doc.file_name || 'file',
-              caption: msg.caption || ''
-            },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({
+          document: buffer,
+          mimetype: doc.mime_type || 'application/octet-stream',
+          fileName: doc.file_name || 'file',
+          caption: msg.caption || ''
+        }));
       }
       // --- VOICE NOTE ---
       else if (msg.voice) {
@@ -820,17 +860,11 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         const fileLink = await ctx.telegram.getFileLink(voice.file_id);
         const buffer = await downloadTelegramFile(fileLink.href);
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            {
-              audio: buffer,
-              ptt: true,
-              mimetype: 'audio/ogg; codecs=opus'
-            },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({
+          audio: buffer,
+          ptt: true,
+          mimetype: 'audio/ogg; codecs=opus'
+        }));
       }
       // --- AUDIO FILE ---
       else if (msg.audio) {
@@ -839,18 +873,12 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         const fileLink = await ctx.telegram.getFileLink(audio.file_id);
         const buffer = await downloadTelegramFile(fileLink.href);
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            {
-              audio: buffer,
-              mimetype: audio.mime_type || 'audio/mp4',
-              fileName: audio.file_name || 'audio.mp3',
-              caption: msg.caption || ''
-            },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({
+          audio: buffer,
+          mimetype: audio.mime_type || 'audio/mp4',
+          fileName: audio.file_name || 'audio.mp3',
+          caption: msg.caption || ''
+        }));
       }
       // --- VIDEO ---
       else if (msg.video) {
@@ -859,16 +887,10 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         const fileLink = await ctx.telegram.getFileLink(video.file_id);
         const buffer = await downloadTelegramFile(fileLink.href);
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            {
-              video: buffer,
-              caption: msg.caption || ''
-            },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({
+          video: buffer,
+          caption: msg.caption || ''
+        }));
       }
       // --- ANIMATION / GIF ---
       else if (msg.animation) {
@@ -877,17 +899,11 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         const fileLink = await ctx.telegram.getFileLink(anim.file_id);
         const buffer = await downloadTelegramFile(fileLink.href);
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            {
-              video: buffer,
-              gifPlayback: true,
-              caption: msg.caption || ''
-            },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({
+          video: buffer,
+          gifPlayback: true,
+          caption: msg.caption || ''
+        }));
       }
       // --- STICKER ---
       else if (msg.sticker) {
@@ -896,15 +912,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         const fileLink = await ctx.telegram.getFileLink(sticker.file_id);
         const buffer = await downloadTelegramFile(fileLink.href);
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            {
-              sticker: buffer
-            },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({ sticker: buffer }));
       }
       // --- CONTACT CARD ---
       else if (msg.contact) {
@@ -926,18 +934,12 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
           `TEL;type=CELL;type=VOICE;waid=${phone}:+${phone}\n` +
           'END:VCARD';
 
-        sentMsg = await sendWithWaRetry(() =>
-          sock.sendMessage(
-            targetJid,
-            {
-              contacts: {
-                displayName: name,
-                contacts: [{ vcard }]
-              }
-            },
-            { quoted }
-          )
-        );
+        sentMsg = await executeWaSend(() => ({
+          contacts: {
+            displayName: name,
+            contacts: [{ vcard }]
+          }
+        }));
       }
 
       // Record in message history and cache for retry re-encryption & echo suppression
@@ -952,6 +954,8 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
           contentText,
           mediaType
         });
+        console.log(`📤 Delivered message to WhatsApp (${targetJid}) for topic ${topicId}`);
+        await ctx.telegram.setMessageReaction(ctx.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👌' }]).catch(() => {});
       }
     } catch (err) {
       console.error('Error forwarding message to WhatsApp:', err);
