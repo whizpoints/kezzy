@@ -74,17 +74,33 @@ export function sanitizeTopicName(name) {
 }
 
 /**
- * Safely download media buffer from a Baileys message
+ * Safely download media buffer from a Baileys message with automatic re-upload support
  */
-export async function downloadWaMedia(msg) {
+export async function downloadWaMedia(msg, sock = null) {
   try {
+    if (!msg || !msg.message) return null;
     const unwrapped = unwrapWaMessage(msg.message);
+    if (!unwrapped || Object.keys(unwrapped).length === 0) return null;
+
+    const mediaMessage = {
+      key: msg.key,
+      message: unwrapped
+    };
+
     const buffer = await downloadMediaMessage(
-      { key: msg.key, message: unwrapped },
+      mediaMessage,
       'buffer',
-      {},
+      { timeout: 35000 },
       {
-        reuploadRequest: () => Promise.resolve()
+        reuploadRequest: sock ? async (m) => {
+          try {
+            console.log(`🔄 Requesting WhatsApp media re-upload for ${m.key?.id}...`);
+            return await sock.updateMediaMessage(m);
+          } catch (reErr) {
+            console.warn(`Media re-upload failed for ${m.key?.id}:`, reErr.message);
+            return m;
+          }
+        } : undefined
       }
     );
     return buffer;
@@ -107,18 +123,47 @@ export async function downloadTelegramFile(fileUrl) {
 }
 
 /**
- * Fetch WhatsApp Profile Picture Buffer for a contact or group
+ * Escape HTML characters for Telegram formatting
  */
-export async function getProfilePictureBuffer(sock, jid) {
-  try {
-    const url = await sock.profilePictureUrl(jid, 'image');
-    if (!url) return null;
-    const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    if (!response.ok) return null;
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch (err) {
-    // Return null if user has privacy settings, no photo, or network timeout
-    return null;
+export function escapeHtml(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Fetch WhatsApp Profile Picture Buffer for a contact or group with stylish avatar fallback
+ */
+export async function getProfilePictureBuffer(sock, jid, contactName = 'WhatsApp Contact') {
+  // 1. Try fetching real WhatsApp profile picture from Baileys if connected
+  if (sock && jid) {
+    try {
+      const url = await sock.profilePictureUrl(jid, 'image');
+      if (url) {
+        const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
+        if (response.ok) {
+          const arrayBuffer = await response.arrayBuffer();
+          return Buffer.from(arrayBuffer);
+        }
+      }
+    } catch (_) {}
   }
+
+  // 2. High-resolution avatar fallback
+  try {
+    const palette = ['0088cc', '128C7E', '25D366', '34B7F1', '075E54', '4B6584', '20BF6B', '8854D0'];
+    const cleanName = (contactName || 'Contact').replace(/[^\w\s]/gi, '').trim() || 'Contact';
+    const color = palette[Math.abs(cleanName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)) % palette.length];
+    const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(cleanName)}&size=512&background=${color}&color=fff&bold=true`;
+
+    const res = await fetch(avatarUrl, { signal: AbortSignal.timeout(4000) });
+    if (res.ok) {
+      const arrayBuf = await res.arrayBuffer();
+      return Buffer.from(arrayBuf);
+    }
+  } catch (_) {}
+
+  return null;
 }

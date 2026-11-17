@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { initDb, runMigrations, getDb } from './db.js';
+import { initDb, runMigrations, getDb, seedContactsFromFile } from './db.js';
 import { createHealthServer } from './server.js';
 import { initTelegramBot } from './telegram.js';
 import { initWhatsApp, getWaSocket, getWaStatus, relinkWhatsApp, getLatestQr } from './whatsapp.js';
@@ -59,6 +59,7 @@ async function main() {
     authToken: TURSO_AUTH_TOKEN
   });
   await runMigrations();
+  await seedContactsFromFile();
 
   // 3. Initialize Telegram Bot
   console.log('🤖 Initializing Telegram bot...');

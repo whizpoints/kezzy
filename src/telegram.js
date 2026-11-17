@@ -5,13 +5,14 @@ import {
   getMappingByWaId,
   saveMapping,
   getMessageHistoryByTgId,
+  getMessageHistoryByWaId,
   saveMessageHistory,
   searchContacts,
   updateMappingName,
   saveContact,
   getContact
 } from './db.js';
-import { formatToWhatsAppJid, sanitizeTopicName, downloadTelegramFile, getProfilePictureBuffer } from './media.js';
+import { formatToWhatsAppJid, sanitizeTopicName, downloadTelegramFile, getProfilePictureBuffer, escapeHtml } from './media.js';
 import { recordBotSentMessage, syncContactsAndTopics, syncAllGroups } from './whatsapp.js';
 
 let botInstance = null;
@@ -533,6 +534,59 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
     console.error(`Telegram bot error on update ${ctx?.update?.update_id}:`, err.message);
   });
 
+  // ================= INTERACTIVE INLINE REPLY ACTION ================= //
+
+  bot.action(/^wa_reply:(.+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const waMsgId = ctx.match[1];
+      const topicId = ctx.callbackQuery?.message?.message_thread_id;
+      const originalTgMsgId = ctx.callbackQuery?.message?.message_id;
+
+      if (!topicId) return;
+
+      const history = await getMessageHistoryByWaId(waMsgId);
+      const rawText = history?.content_text || '';
+      const preview = rawText
+        ? (rawText.length > 50 ? rawText.substring(0, 47) + '...' : rawText)
+        : 'WhatsApp Message';
+
+      const prompt = await ctx.telegram.sendMessage(
+        ctx.chat.id,
+        `💬 <b>Reply to:</b> <i>"${escapeHtml(preview)}"</i>\n` +
+        `<i>Type your reply or attach any photo, document, voice note, or video:</i>`,
+        {
+          message_thread_id: topicId,
+          reply_to_message_id: originalTgMsgId,
+          parse_mode: 'HTML',
+          reply_markup: {
+            force_reply: true,
+            selective: true
+          }
+        }
+      ).catch(err => {
+        console.warn('Failed to send reply prompt:', err.message);
+        return null;
+      });
+
+      if (prompt?.message_id) {
+        try {
+          await saveMessageHistory({
+            waMessageId: waMsgId,
+            tgMessageId: prompt.message_id,
+            waChatId: history?.wa_chat_id || 'unknown',
+            tgTopicId: topicId,
+            senderWaId: 'me',
+            contentText: `[Prompt: ${preview}]`,
+            mediaType: 'reply_prompt'
+          });
+        } catch (_) {}
+      }
+    } catch (err) {
+      console.warn('Error handling wa_reply action:', err.message);
+    }
+  });
+
   // ================= GENERAL MESSAGE ROUTING (Telegram -> WhatsApp) ================= //
 
   bot.on('message', async (ctx) => {
@@ -824,6 +878,42 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
             {
               video: buffer,
               caption: msg.caption || ''
+            },
+            { quoted }
+          )
+        );
+      }
+      // --- ANIMATION / GIF ---
+      else if (msg.animation) {
+        mediaType = 'animation';
+        const anim = msg.animation;
+        const fileLink = await ctx.telegram.getFileLink(anim.file_id);
+        const buffer = await downloadTelegramFile(fileLink.href);
+
+        sentMsg = await sendWithWaRetry(() =>
+          sock.sendMessage(
+            targetJid,
+            {
+              video: buffer,
+              gifPlayback: true,
+              caption: msg.caption || ''
+            },
+            { quoted }
+          )
+        );
+      }
+      // --- STICKER ---
+      else if (msg.sticker) {
+        mediaType = 'sticker';
+        const sticker = msg.sticker;
+        const fileLink = await ctx.telegram.getFileLink(sticker.file_id);
+        const buffer = await downloadTelegramFile(fileLink.href);
+
+        sentMsg = await sendWithWaRetry(() =>
+          sock.sendMessage(
+            targetJid,
+            {
+              sticker: buffer
             },
             { quoted }
           )

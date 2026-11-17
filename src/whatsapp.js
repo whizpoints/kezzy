@@ -241,6 +241,121 @@ export async function resolveChatTitle(sock, jid, pushName = null) {
 }
 
 /**
+ * Force WhatsApp Baileys to download the full address book and contact mutations
+ */
+export async function resyncContactsAndAppState(sock) {
+  if (!sock) return;
+  console.log('🔄 Triggering full App State sync for contacts & address book...');
+  const collections = ['critical_unblock_low', 'critical_block', 'regular_high', 'regular_low', 'regular'];
+  try {
+    await sock.resyncAppState(collections, true);
+    console.log('✅ App State Sync request dispatched successfully.');
+  } catch (err) {
+    console.warn('App state sync notice:', err.message);
+  }
+}
+
+/**
+ * Generate and pin profile picture card at the top of a topic
+ */
+export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId, chatName) {
+  if (!bot || !groupId || !topicId || !waId) return;
+  if (waId === '__storage_media__' || waId === '0@s.whatsapp.net' || waId.endsWith('@g.us')) return;
+
+  try {
+    const contact = await getContact(waId);
+    const name = contact?.name || chatName.replace(/\s*\(\+.*\)/, '') || 'WhatsApp Contact';
+    const phone = contact?.phone_number || (waId.includes('@s.whatsapp.net') ? waId.split('@')[0] : null);
+
+    const buffer = await getProfilePictureBuffer(sock, waId, name);
+    if (!buffer) return;
+
+    const caption =
+      `👤 <b>${escapeHtml(name)}</b>\n` +
+      `📞 <code>+${phone || 'Unsaved'}</code>\n` +
+      `💬 <b>WhatsApp Direct Chat</b>\n\n` +
+      `📌 <i>Pinned Profile Card</i>`;
+
+    const card = await bot.telegram.sendPhoto(
+      groupId,
+      { source: buffer, filename: 'profile.jpg' },
+      {
+        message_thread_id: topicId,
+        caption,
+        parse_mode: 'HTML'
+      }
+    ).catch(() => null);
+
+    if (card) {
+      await bot.telegram.pinChatMessage(groupId, card.message_id, {
+        disable_notification: true
+      }).catch(() => {});
+    }
+  } catch (err) {
+    // Ignore rate limits or temporary pin errors gracefully
+  }
+}
+
+/**
+ * Generate Telegram inline reply buttons for forwarded WhatsApp messages
+ */
+export function makeReplyMarkup(msgKey, isFromMe, mediaType = 'text', groupId = null, storageTopicId = null) {
+  if (isFromMe || !msgKey?.id) return undefined;
+  const buttons = [
+    { text: '💬 Reply', callback_data: `wa_reply:${msgKey.id}` }
+  ];
+  if (mediaType !== 'text' && storageTopicId && groupId) {
+    const cleanGid = String(groupId).replace('-100', '');
+    buttons.push({ text: '📁 Storage', url: `https://t.me/c/${cleanGid}/${storageTopicId}` });
+  }
+  return { inline_keyboard: [buttons] };
+}
+
+/**
+ * Automatically check and upgrade Telegram topic name if a better contact name was discovered
+ */
+export async function renameTopicIfBetter(sock, bot, groupId, c) {
+  if (!c || !c.id || !bot) return;
+
+  const targetWaId = c.id;
+  const candidateLid = c.lid || (targetWaId.endsWith('@lid') ? targetWaId : null);
+  const candidatePhone = c.phoneNumber || (targetWaId.endsWith('@s.whatsapp.net') ? targetWaId.split('@')[0].split(':')[0] : null);
+
+  let mapping = await getMappingByWaId(targetWaId);
+  if (!mapping && candidateLid) {
+    mapping = await getMappingByWaId(candidateLid);
+  }
+  if (!mapping && candidatePhone) {
+    mapping = await getMappingByWaId(`${candidatePhone}@s.whatsapp.net`);
+  }
+
+  if (!mapping) return;
+
+  const isGeneric =
+    mapping.chat_name.startsWith('WhatsApp Contact') ||
+    mapping.chat_name.startsWith('WhatsApp User') ||
+    /^\d+$/.test(mapping.chat_name) ||
+    mapping.chat_name.includes('(+0)');
+
+  const resolved = await resolveChatTitle(sock, mapping.wa_id, c.name);
+  const safe = sanitizeTopicName(resolved);
+
+  if (safe !== mapping.chat_name && (isGeneric || (!mapping.chat_name.includes('(+') && safe.includes('(+')))) {
+    try {
+      await retryTelegramCall(async () => {
+        await bot.telegram.editForumTopic(groupId, mapping.tg_topic_id, { name: safe });
+      }, 2, 800);
+      await updateMappingName(mapping.wa_id, safe);
+      console.log(`✨ Renamed topic ${mapping.tg_topic_id} from "${mapping.chat_name}" to "${safe}" on contact update.`);
+    } catch (err) {
+      if (!err.message?.includes('TOPIC_NOT_MODIFIED')) {
+        console.warn(`Could not rename topic ${mapping.tg_topic_id}:`, err.message);
+      }
+    }
+  }
+}
+
+/**
  * Synchronize contacts, register own account, and rename all existing forum topics
  * to their clean saved address book names and phone numbers.
  */
@@ -276,7 +391,47 @@ export async function syncContactsAndTopics(sock, bot, groupId) {
     }
   }
 
-  // 2. Audit existing Telegram Forum Topics
+  // 2. Trigger app state resync to pull address book
+  await resyncContactsAndAppState(sock);
+
+  // 3. Batch resolve WhatsApp LIDs for all contacts with phone numbers
+  try {
+    const contactsWithPhone = await getContactsWithPhone();
+    if (contactsWithPhone.length > 0) {
+      console.log(`📱 Resolving LIDs for ${contactsWithPhone.length} phone contacts via onWhatsApp...`);
+      const chunkSize = 25;
+      for (let i = 0; i < contactsWithPhone.length; i += chunkSize) {
+        const chunk = contactsWithPhone.slice(i, i + chunkSize);
+        const phones = chunk.map(c => c.phone_number);
+        try {
+          const results = await sock.onWhatsApp(...phones);
+          if (Array.isArray(results)) {
+            for (const res of results) {
+              if (res.exists && res.lid) {
+                const phone = res.jid.split('@')[0]?.split(':')[0];
+                const matching = chunk.find(c => c.phone_number === phone);
+                const contactName = matching?.name || null;
+                await updateContactLid(phone, res.lid);
+                await saveContact({
+                  waId: res.lid,
+                  name: contactName,
+                  phoneNumber: phone,
+                  lid: res.lid
+                });
+              }
+            }
+          }
+        } catch (onWaErr) {
+          console.warn('onWhatsApp batch query note:', onWaErr.message);
+        }
+        await new Promise(r => setTimeout(r, 400));
+      }
+    }
+  } catch (err) {
+    console.warn('LID resolution note:', err.message);
+  }
+
+  // 4. Audit existing Telegram Forum Topics
   const allMappings = await getAllMappings();
   console.log(`📋 Auditing ${allMappings.length} forum topics for name updates...`);
   let renamedCount = 0;
@@ -310,6 +465,11 @@ export async function syncContactsAndTopics(sock, bot, groupId) {
           console.warn(`Could not rename topic ${mapping.tg_topic_id}:`, err.message);
         }
       }
+    }
+
+    // Ensure 1:1 chat topics have their pinned profile photo cards
+    if (!mapping.is_group && mapping.wa_id !== '__storage_media__' && mapping.wa_id !== '0@s.whatsapp.net') {
+      await ensurePinnedProfileCard(sock, bot, groupId, mapping.tg_topic_id, mapping.wa_id, safeTitle);
     }
   }
 
@@ -580,7 +740,15 @@ export async function initWhatsApp({
     sockInstance = sock;
 
     // Listen for creds updates
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async (update) => {
+      saveCreds(update);
+      if (update?.myAppStateKeyId) {
+        console.log('🔑 New app state sync key received, triggering background address book sync...');
+        setTimeout(() => {
+          resyncContactsAndAppState(sock).catch(() => {});
+        }, 1500);
+      }
+    });
 
     // Connection events (QR, Connected, Disconnected)
     sock.ev.on('connection.update', async (update) => {
@@ -669,11 +837,13 @@ export async function initWhatsApp({
         }
 
         // Resync Baileys app state to pull full address book and group names
-        try {
-          await sock.resyncAppState(['critical_unblock_low', 'regular_high', 'regular_low', 'critical_block', 'regular'], false);
-        } catch (syncErr) {
-          console.warn('App state resync warning:', syncErr.message);
-        }
+        setTimeout(async () => {
+          try {
+            await resyncContactsAndAppState(sock);
+          } catch (syncErr) {
+            console.warn('App state resync warning:', syncErr.message);
+          }
+        }, 2000);
 
         // Pre-create and ensure Storage Vault Topic exists on startup
         await getOrCreateStorageTopic(bot, groupId);
@@ -768,12 +938,14 @@ export async function initWhatsApp({
   sock.ev.on('contacts.upsert', async (contacts) => {
     for (const c of contacts) {
       await processContactData(c);
+      await renameTopicIfBetter(sock, bot, groupId, c);
     }
   });
 
   sock.ev.on('contacts.update', async (updates) => {
     for (const c of updates) {
       await processContactData(c);
+      await renameTopicIfBetter(sock, bot, groupId, c);
     }
   });
 
@@ -961,24 +1133,7 @@ export async function initWhatsApp({
           });
 
           // Fetch & pin profile photo card
-          const avatarBuffer = await getProfilePictureBuffer(sock, chatJid);
-          if (avatarBuffer) {
-            const card = await bot.telegram.sendPhoto(
-              groupId,
-              { source: avatarBuffer },
-              {
-                message_thread_id: topic.message_thread_id,
-                caption: `📸 <b>${safeTitle}</b>`,
-                parse_mode: 'HTML'
-              }
-            ).catch(() => null);
-
-            if (card) {
-              await bot.telegram.pinChatMessage(groupId, card.message_id, {
-                disable_notification: true
-              }).catch(() => {});
-            }
-          }
+          await ensurePinnedProfileCard(sock, bot, groupId, topic.message_thread_id, chatJid, safeTitle);
 
           await new Promise(r => setTimeout(r, 600));
         } catch (err) {
@@ -1036,10 +1191,12 @@ export async function initWhatsApp({
               ? `${prefix}<blockquote>${escapeHtml(bodyText)}</blockquote>`
               : `${prefix}${escapeHtml(bodyText)}`;
 
+            const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'text', groupId, storageTopicId);
             sentTgMsg = await sendWithRetry(() =>
               bot.telegram.sendMessage(groupId, formatted, {
                 message_thread_id: topicId,
-                parse_mode: 'HTML'
+                parse_mode: 'HTML',
+                reply_markup: replyMarkup
               })
             );
           }
@@ -1048,13 +1205,15 @@ export async function initWhatsApp({
             mediaType = 'image';
             bodyText = msgContent.imageMessage.caption || '';
             const caption = `${prefix}${escapeHtml(bodyText)}`.trim();
-            const buffer = await downloadWaMedia(m);
+            const buffer = await downloadWaMedia(m, sock);
+            const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'image', groupId, storageTopicId);
             if (buffer) {
               sentTgMsg = await sendWithRetry(() =>
                 bot.telegram.sendPhoto(groupId, { source: buffer, filename: 'photo.jpg' }, {
                   message_thread_id: topicId,
                   caption,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
                 })
               );
 
@@ -1074,7 +1233,7 @@ export async function initWhatsApp({
                 bot.telegram.sendMessage(
                   groupId,
                   `${prefix}📷 <i>[Photo - WhatsApp media expired]</i>\n${escapeHtml(bodyText)}`.trim(),
-                  { message_thread_id: topicId, parse_mode: 'HTML' }
+                  { message_thread_id: topicId, parse_mode: 'HTML', reply_markup: replyMarkup }
                 )
               );
             }
@@ -1086,13 +1245,15 @@ export async function initWhatsApp({
             bodyText = doc.caption || '';
             const fileName = doc.fileName || 'document';
             const caption = `${prefix}${escapeHtml(bodyText)}`.trim();
-            const buffer = await downloadWaMedia(m);
+            const buffer = await downloadWaMedia(m, sock);
+            const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'document', groupId, storageTopicId);
             if (buffer) {
               sentTgMsg = await sendWithRetry(() =>
                 bot.telegram.sendDocument(groupId, { source: buffer, filename: fileName }, {
                   message_thread_id: topicId,
                   caption,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
                 })
               );
 
@@ -1112,7 +1273,7 @@ export async function initWhatsApp({
                 bot.telegram.sendMessage(
                   groupId,
                   `${prefix}📄 <i>[Document: ${escapeHtml(fileName)} - WhatsApp media expired]</i>\n${escapeHtml(bodyText)}`.trim(),
-                  { message_thread_id: topicId, parse_mode: 'HTML' }
+                  { message_thread_id: topicId, parse_mode: 'HTML', reply_markup: replyMarkup }
                 )
               );
             }
@@ -1121,14 +1282,16 @@ export async function initWhatsApp({
           else if (msgContent.audioMessage) {
             const isVoice = !!msgContent.audioMessage.ptt;
             mediaType = isVoice ? 'voice' : 'audio';
-            const buffer = await downloadWaMedia(m);
+            const buffer = await downloadWaMedia(m, sock);
+            const replyMarkup = makeReplyMarkup(m.key, isFromMe, mediaType, groupId, storageTopicId);
             if (buffer) {
               if (isVoice) {
                 sentTgMsg = await sendWithRetry(() =>
                   bot.telegram.sendVoice(groupId, { source: buffer }, {
                     message_thread_id: topicId,
                     caption: prefix.trim(),
-                    parse_mode: 'HTML'
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
                   })
                 );
               } else {
@@ -1136,7 +1299,8 @@ export async function initWhatsApp({
                   bot.telegram.sendAudio(groupId, { source: buffer, filename: 'audio.mp3' }, {
                     message_thread_id: topicId,
                     caption: prefix.trim(),
-                    parse_mode: 'HTML'
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
                   })
                 );
               }
@@ -1157,7 +1321,7 @@ export async function initWhatsApp({
                 bot.telegram.sendMessage(
                   groupId,
                   `${prefix}🎤 <i>[Voice Note - WhatsApp media expired]</i>`,
-                  { message_thread_id: topicId, parse_mode: 'HTML' }
+                  { message_thread_id: topicId, parse_mode: 'HTML', reply_markup: replyMarkup }
                 )
               );
             }
@@ -1167,13 +1331,15 @@ export async function initWhatsApp({
             mediaType = 'video';
             bodyText = msgContent.videoMessage.caption || '';
             const caption = `${prefix}${escapeHtml(bodyText)}`.trim();
-            const buffer = await downloadWaMedia(m);
+            const buffer = await downloadWaMedia(m, sock);
+            const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'video', groupId, storageTopicId);
             if (buffer) {
               sentTgMsg = await sendWithRetry(() =>
                 bot.telegram.sendVideo(groupId, { source: buffer, filename: 'video.mp4' }, {
                   message_thread_id: topicId,
                   caption,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
                 })
               );
 
@@ -1193,7 +1359,7 @@ export async function initWhatsApp({
                 bot.telegram.sendMessage(
                   groupId,
                   `${prefix}🎥 <i>[Video - WhatsApp media expired]</i>\n${escapeHtml(bodyText)}`.trim(),
-                  { message_thread_id: topicId, parse_mode: 'HTML' }
+                  { message_thread_id: topicId, parse_mode: 'HTML', reply_markup: replyMarkup }
                 )
               );
             }
@@ -1322,24 +1488,7 @@ export async function initWhatsApp({
           }
 
           // Fetch & pin profile photo card
-          const avatarBuffer = await getProfilePictureBuffer(sock, remoteJid);
-          if (avatarBuffer) {
-            const card = await bot.telegram.sendPhoto(
-              groupId,
-              { source: avatarBuffer },
-              {
-                message_thread_id: topic.message_thread_id,
-                caption: `📸 <b>${safeTitle}</b>\nWhatsApp: <code>${remoteJid.split('@')[0]}</code>`,
-                parse_mode: 'HTML'
-              }
-            ).catch(() => null);
-
-            if (card) {
-              await bot.telegram.pinChatMessage(groupId, card.message_id, {
-                disable_notification: true
-              }).catch(() => {});
-            }
-          }
+          await ensurePinnedProfileCard(sock, bot, groupId, topic.message_thread_id, remoteJid, safeTitle);
 
           console.log(`✨ Created new Telegram Topic "${safeTitle}" for ${remoteJid}`);
         } catch (err) {
@@ -1407,24 +1556,7 @@ export async function initWhatsApp({
                 await bot.telegram.closeForumTopic(groupId, newTopicId).catch(() => {});
               }
 
-              const avatarBuffer = await getProfilePictureBuffer(sock, remoteJid);
-              if (avatarBuffer) {
-                const card = await bot.telegram.sendPhoto(
-                  groupId,
-                  { source: avatarBuffer, filename: 'avatar.jpg' },
-                  {
-                    message_thread_id: newTopicId,
-                    caption: `📸 <b>${safeTitle}</b>\nWhatsApp: <code>${remoteJid.split('@')[0]}</code>`,
-                    parse_mode: 'HTML'
-                  }
-                ).catch(() => null);
-
-                if (card) {
-                  await bot.telegram.pinChatMessage(groupId, card.message_id, {
-                    disable_notification: true
-                  }).catch(() => {});
-                }
-              }
+              await ensurePinnedProfileCard(sock, bot, groupId, newTopicId, remoteJid, safeTitle);
 
               return await sendFn(newTopicId);
             }
@@ -1439,13 +1571,15 @@ export async function initWhatsApp({
             ? `${prefix}<blockquote>${escapeHtml(bodyText)}</blockquote>`
             : `${prefix}${escapeHtml(bodyText)}`;
 
+          const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'text', groupId, storageTopicId);
           sentTgMsg = await sendWithTopicRecovery((tid) =>
             bot.telegram.sendMessage(
               groupId,
               formatted,
               {
                 message_thread_id: tid,
-                parse_mode: 'HTML'
+                parse_mode: 'HTML',
+                reply_markup: replyMarkup
               }
             )
           );
@@ -1454,7 +1588,8 @@ export async function initWhatsApp({
         else if (msgContent.imageMessage) {
           mediaType = 'image';
           bodyText = msgContent.imageMessage.caption || '';
-          const buffer = await downloadWaMedia(m);
+          const buffer = await downloadWaMedia(m, sock);
+          const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'image', groupId, storageTopicId);
           if (buffer) {
             sentTgMsg = await sendWithTopicRecovery((tid) =>
               bot.telegram.sendPhoto(
@@ -1463,7 +1598,8 @@ export async function initWhatsApp({
                 {
                   message_thread_id: tid,
                   caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
                 }
               )
             );
@@ -1484,7 +1620,8 @@ export async function initWhatsApp({
           const doc = msgContent.documentMessage;
           bodyText = doc.caption || '';
           const fileName = doc.fileName || 'document';
-          const buffer = await downloadWaMedia(m);
+          const buffer = await downloadWaMedia(m, sock);
+          const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'document', groupId, storageTopicId);
           if (buffer) {
             sentTgMsg = await sendWithTopicRecovery((tid) =>
               bot.telegram.sendDocument(
@@ -1493,7 +1630,8 @@ export async function initWhatsApp({
                 {
                   message_thread_id: tid,
                   caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
                 }
               )
             );
@@ -1512,7 +1650,8 @@ export async function initWhatsApp({
         else if (msgContent.audioMessage) {
           const isVoice = !!msgContent.audioMessage.ptt;
           mediaType = isVoice ? 'voice' : 'audio';
-          const buffer = await downloadWaMedia(m);
+          const buffer = await downloadWaMedia(m, sock);
+          const replyMarkup = makeReplyMarkup(m.key, isFromMe, mediaType, groupId, storageTopicId);
           if (buffer) {
             if (isVoice) {
               sentTgMsg = await sendWithTopicRecovery((tid) =>
@@ -1522,7 +1661,8 @@ export async function initWhatsApp({
                   {
                     message_thread_id: tid,
                     caption: prefix ? prefix.trim() : undefined,
-                    parse_mode: 'HTML'
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
                   }
                 )
               );
@@ -1534,7 +1674,8 @@ export async function initWhatsApp({
                   {
                     message_thread_id: tid,
                     caption: prefix ? prefix.trim() : undefined,
-                    parse_mode: 'HTML'
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
                   }
                 )
               );
@@ -1554,7 +1695,8 @@ export async function initWhatsApp({
         else if (msgContent.videoMessage) {
           mediaType = 'video';
           bodyText = msgContent.videoMessage.caption || '';
-          const buffer = await downloadWaMedia(m);
+          const buffer = await downloadWaMedia(m, sock);
+          const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'video', groupId, storageTopicId);
           if (buffer) {
             sentTgMsg = await sendWithTopicRecovery((tid) =>
               bot.telegram.sendVideo(
@@ -1563,7 +1705,8 @@ export async function initWhatsApp({
                 {
                   message_thread_id: tid,
                   caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
                 }
               )
             );
@@ -1581,7 +1724,8 @@ export async function initWhatsApp({
         // --- 6. Sticker Message ---
         else if (msgContent.stickerMessage) {
           mediaType = 'sticker';
-          const buffer = await downloadWaMedia(m);
+          const buffer = await downloadWaMedia(m, sock);
+          const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'sticker', groupId, storageTopicId);
           if (buffer) {
             sentTgMsg = await sendWithTopicRecovery((tid) =>
               bot.telegram.sendDocument(
@@ -1590,7 +1734,8 @@ export async function initWhatsApp({
                 {
                   message_thread_id: tid,
                   caption: `${prefix}<i>[Sticker]</i>`,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  reply_markup: replyMarkup
                 }
               )
             );

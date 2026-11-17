@@ -292,3 +292,88 @@ export async function searchContacts(queryText) {
   });
   return res.rows;
 }
+
+/**
+ * Automatically seed extracted WhatsApp contacts from contacts.json into Turso DB
+ */
+export async function seedContactsFromFile() {
+  try {
+    const contactsPath = path.resolve(__dirname, 'data/contacts.json');
+    if (!fs.existsSync(contactsPath)) return 0;
+
+    const rawContacts = JSON.parse(fs.readFileSync(contactsPath, 'utf8'));
+    if (!Array.isArray(rawContacts) || rawContacts.length === 0) return 0;
+
+    const contactMap = new Map();
+    for (const c of rawContacts) {
+      const user = c.id?.user;
+      const server = c.id?.server;
+      const num = c.number;
+      const rawName = c.name || c.shortName || c.pushname || null;
+
+      let phone = null;
+      let lid = null;
+
+      if (server === 'c.us' && user) phone = user;
+      if (server === 'lid' && user) lid = user;
+
+      if (num) {
+        if (num.length >= 14) lid = num;
+        else if (num.length >= 8 && num.length <= 13) phone = num;
+      }
+
+      const key = phone || lid;
+      if (!key) continue;
+
+      const entry = contactMap.get(key) || { phone: null, lid: null, name: null, pushname: null };
+      if (phone) entry.phone = phone;
+      if (lid) entry.lid = lid;
+      if (rawName && (!entry.name || entry.name.startsWith('+'))) {
+        entry.name = rawName;
+      }
+      if (c.pushname && !entry.pushname) {
+        entry.pushname = c.pushname;
+      }
+
+      contactMap.set(key, entry);
+      if (entry.phone) contactMap.set(entry.phone, entry);
+      if (entry.lid) contactMap.set(entry.lid, entry);
+    }
+
+    const uniqueContacts = Array.from(new Set(contactMap.values()));
+    const query = `
+      INSERT INTO contacts (wa_id, name, phone_number, lid, updated_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(wa_id) 
+      DO UPDATE SET 
+        name = COALESCE(excluded.name, contacts.name),
+        phone_number = COALESCE(excluded.phone_number, contacts.phone_number),
+        lid = COALESCE(excluded.lid, contacts.lid),
+        updated_at = CURRENT_TIMESTAMP;
+    `;
+
+    const statements = [];
+    for (const c of uniqueContacts) {
+      const phoneJid = c.phone ? `${c.phone}@s.whatsapp.net` : null;
+      const lidJid = c.lid ? `${c.lid}@lid` : null;
+      const name = c.name || (c.phone ? `Contact ${c.phone.slice(-4)}` : 'WhatsApp Contact');
+      const phone = c.phone || null;
+
+      if (phoneJid) statements.push({ sql: query, args: [phoneJid, name, phone, lidJid] });
+      if (lidJid) statements.push({ sql: query, args: [lidJid, name, phone, lidJid] });
+      if (phone) statements.push({ sql: query, args: [phone, name, phone, lidJid] });
+    }
+
+    const chunkSize = 100;
+    for (let i = 0; i < statements.length; i += chunkSize) {
+      const chunk = statements.slice(i, i + chunkSize);
+      await client.batch(chunk, 'write');
+    }
+
+    console.log(`✅ Loaded & verified ${uniqueContacts.length} contacts from contacts.json into Turso DB.`);
+    return uniqueContacts.length;
+  } catch (err) {
+    console.warn('Contacts auto-seed notice:', err.message);
+    return 0;
+  }
+}
