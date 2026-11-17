@@ -77,6 +77,17 @@ export function sanitizeTopicName(name) {
 /**
  * Safely download media buffer from a Baileys message with automatic re-upload support & direct stream fallback
  */
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Referer': 'https://web.whatsapp.com/',
+  'Origin': 'https://web.whatsapp.com',
+  'Accept': '*/*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Sec-Fetch-Dest': 'empty',
+  'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'cross-site'
+};
+
 export async function downloadWaMedia(msg, sock = null) {
   try {
     if (!msg || !msg.message) return null;
@@ -88,12 +99,17 @@ export async function downloadWaMedia(msg, sock = null) {
       message: unwrapped
     };
 
-    // Strategy 1: Baileys downloadMediaMessage with logger & re-upload
+    // Strategy 1: Baileys downloadMediaMessage with logger, browser headers & re-upload
     try {
       const buffer = await downloadMediaMessage(
         mediaMessage,
         'buffer',
-        { timeout: 12000 },
+        {
+          timeout: 12000,
+          options: {
+            headers: BROWSER_HEADERS
+          }
+        },
         {
           logger: {
             info: () => {},
@@ -118,7 +134,7 @@ export async function downloadWaMedia(msg, sock = null) {
       console.warn(`Primary media download note (${primaryErr.message}). Attempting direct stream fallback...`);
     }
 
-    // Strategy 2: Direct stream extraction via downloadContentFromMessage
+    // Strategy 2: Direct stream extraction via downloadContentFromMessage with browser headers
     const contentType = Object.keys(unwrapped).find(k => k.endsWith('Message') && k !== 'extendedTextMessage' && k !== 'conversation');
     if (contentType) {
       const mediaObj = unwrapped[contentType];
@@ -133,7 +149,12 @@ export async function downloadWaMedia(msg, sock = null) {
       const streamType = validTypes[type] || 'document';
       if (mediaObj && (mediaObj.url || mediaObj.directPath) && mediaObj.mediaKey) {
         try {
-          const stream = await downloadContentFromMessage(mediaObj, streamType, { timeout: 8000 });
+          const stream = await downloadContentFromMessage(mediaObj, streamType, {
+            options: {
+              headers: BROWSER_HEADERS
+            },
+            timeout: 8000
+          });
           const chunks = [];
           for await (const chunk of stream) {
             chunks.push(chunk);

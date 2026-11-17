@@ -18,7 +18,44 @@ import { recordBotSentMessage, syncContactsAndTopics, syncAllGroups } from './wh
 let botInstance = null;
 let currentGroupId = null;
 let currentGeneralTopicId = 1;
+let currentBotToken = null;
 const botLaunchTime = Math.floor(Date.now() / 1000);
+
+/**
+ * Robust native multipart uploader using global fetch + FormData + Blob.
+ * Bypasses node-fetch v2 chunked stream issues / socket hang ups on cloud platforms.
+ */
+export async function uploadTelegramMedia(method, fields, buffer, filename, fieldName = 'document') {
+  const token = currentBotToken || process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    throw new Error('Telegram bot token not available');
+  }
+  const form = new FormData();
+  form.append('chat_id', fields.chatId || currentGroupId);
+  if (fields.topicId && fields.topicId > 1) {
+    form.append('message_thread_id', String(fields.topicId));
+  }
+  if (fields.caption) {
+    form.append('caption', fields.caption);
+  }
+  if (fields.parseMode) {
+    form.append('parse_mode', fields.parseMode);
+  }
+  if (fields.replyMarkup) {
+    form.append('reply_markup', typeof fields.replyMarkup === 'string' ? fields.replyMarkup : JSON.stringify(fields.replyMarkup));
+  }
+  form.append(fieldName, new Blob([buffer]), filename || 'file');
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: 'POST',
+    body: form
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    throw new Error(data.description || 'Telegram native upload failed');
+  }
+  return data.result;
+}
 
 /**
  * Retry helper for Telegram API calls with exponential backoff on network errors & rate limits
@@ -78,6 +115,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
     }
   });
   botInstance = bot;
+  currentBotToken = botToken;
   currentGroupId = groupId.toString();
   currentGeneralTopicId = parseInt(generalTopicId, 10) || 1;
 

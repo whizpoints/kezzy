@@ -7,7 +7,7 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import NodeCache from 'node-cache';
 import { useTursoAuthState } from './tursoAuth.js';
-import { retryTelegramCall } from './telegram.js';
+import { retryTelegramCall, uploadTelegramMedia } from './telegram.js';
 import {
   getMappingByWaId,
   saveMapping,
@@ -709,15 +709,25 @@ export async function mirrorMediaToStorage(bot, groupId, { mediaType, buffer, fi
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         if (mediaType === 'image') {
-          await bot.telegram.sendPhoto(groupId, { source: buffer }, extra);
+          await bot.telegram.sendPhoto(groupId, { source: buffer }, extra).catch(() =>
+            uploadTelegramMedia('sendPhoto', { chatId: groupId, topicId: sTopicId, caption: storageCaption, parseMode: 'HTML' }, buffer, 'photo.jpg', 'photo')
+          );
         } else if (mediaType === 'document') {
-          await bot.telegram.sendDocument(groupId, { source: buffer, filename: filename || 'file' }, extra);
+          await bot.telegram.sendDocument(groupId, { source: buffer, filename: filename || 'file' }, extra).catch(() =>
+            uploadTelegramMedia('sendDocument', { chatId: groupId, topicId: sTopicId, caption: storageCaption, parseMode: 'HTML' }, buffer, filename || 'file', 'document')
+          );
         } else if (mediaType === 'voice') {
-          await bot.telegram.sendVoice(groupId, { source: buffer }, extra);
+          await bot.telegram.sendVoice(groupId, { source: buffer }, extra).catch(() =>
+            uploadTelegramMedia('sendVoice', { chatId: groupId, topicId: sTopicId, caption: storageCaption, parseMode: 'HTML' }, buffer, 'voice.ogg', 'voice')
+          );
         } else if (mediaType === 'audio') {
-          await bot.telegram.sendAudio(groupId, { source: buffer, filename: filename || 'audio.mp3' }, extra);
+          await bot.telegram.sendAudio(groupId, { source: buffer, filename: filename || 'audio.mp3' }, extra).catch(() =>
+            uploadTelegramMedia('sendAudio', { chatId: groupId, topicId: sTopicId, caption: storageCaption, parseMode: 'HTML' }, buffer, filename || 'audio.mp3', 'audio')
+          );
         } else if (mediaType === 'video') {
-          await bot.telegram.sendVideo(groupId, { source: buffer }, extra);
+          await bot.telegram.sendVideo(groupId, { source: buffer }, extra).catch(() =>
+            uploadTelegramMedia('sendVideo', { chatId: groupId, topicId: sTopicId, caption: storageCaption, parseMode: 'HTML' }, buffer, 'video.mp4', 'video')
+          );
         }
         break;
       } catch (sendErr) {
@@ -1687,18 +1697,29 @@ export async function initWhatsApp({
                 }
               )
             ).catch(async (photoErr) => {
-              console.warn('Failed to upload photo binary to Telegram, falling back to text:', photoErr.message);
-              return await sendWithTopicRecovery((tid) =>
-                bot.telegram.sendMessage(
-                  groupId,
-                  `${prefix}📷 <b>[Photo]</b>\n${escapeHtml(bodyText)}`.trim(),
-                  {
-                    message_thread_id: tid,
-                    parse_mode: 'HTML',
-                    reply_markup: replyMarkup
-                  }
-                )
-              );
+              console.warn('Telegraf sendPhoto note, attempting native multipart upload:', photoErr.message);
+              try {
+                return await uploadTelegramMedia('sendPhoto', {
+                  chatId: groupId,
+                  topicId,
+                  caption: `${prefix}${escapeHtml(bodyText)}`,
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, 'photo.jpg', 'photo');
+              } catch (nativeErr) {
+                console.warn('Native photo upload note, falling back to text:', nativeErr.message);
+                return await sendWithTopicRecovery((tid) =>
+                  bot.telegram.sendMessage(
+                    groupId,
+                    `${prefix}📷 <b>[Photo]</b>\n${escapeHtml(bodyText)}`.trim(),
+                    {
+                      message_thread_id: tid,
+                      parse_mode: 'HTML',
+                      reply_markup: replyMarkup
+                    }
+                  )
+                );
+              }
             });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'image',
@@ -1745,18 +1766,29 @@ export async function initWhatsApp({
                 }
               )
             ).catch(async (docErr) => {
-              console.warn('Failed to upload document binary to Telegram, falling back to text:', docErr.message);
-              return await sendWithTopicRecovery((tid) =>
-                bot.telegram.sendMessage(
-                  groupId,
-                  `${prefix}📄 <b>[Document: ${escapeHtml(fileName)}${fileSize}]</b>\n${escapeHtml(bodyText)}`.trim(),
-                  {
-                    message_thread_id: tid,
-                    parse_mode: 'HTML',
-                    reply_markup: replyMarkup
-                  }
-                )
-              );
+              console.warn('Telegraf sendDocument note, attempting native multipart upload:', docErr.message);
+              try {
+                return await uploadTelegramMedia('sendDocument', {
+                  chatId: groupId,
+                  topicId,
+                  caption: `${prefix}${escapeHtml(bodyText)}`,
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, fileName, 'document');
+              } catch (nativeErr) {
+                console.warn('Native document upload note, falling back to text:', nativeErr.message);
+                return await sendWithTopicRecovery((tid) =>
+                  bot.telegram.sendMessage(
+                    groupId,
+                    `${prefix}📄 <b>[Document: ${escapeHtml(fileName)}${fileSize}]</b>\n${escapeHtml(bodyText)}`.trim(),
+                    {
+                      message_thread_id: tid,
+                      parse_mode: 'HTML',
+                      reply_markup: replyMarkup
+                    }
+                  )
+                );
+              }
             });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'document',
