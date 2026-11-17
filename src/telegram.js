@@ -240,6 +240,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
 
     const name = rest || `Contact ${cleanDigits.slice(-4)}`;
     const waJid = `${cleanDigits}@s.whatsapp.net`;
+    const cleanGroupId = currentGroupId.replace('-100', '');
 
     try {
       await saveContact({
@@ -248,18 +249,31 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         phoneNumber: cleanDigits
       });
 
-      const existing = await getMappingByWaId(waJid);
-      if (existing) {
+      let existing = await getMappingByWaId(waJid);
+      let targetTopicId = existing?.tg_topic_id;
+
+      if (!targetTopicId) {
         const safeTitle = sanitizeTopicName(`${name} (+${cleanDigits})`);
-        await bot.telegram.editForumTopic(currentGroupId, existing.tg_topic_id, { name: safeTitle });
+        const topic = await bot.telegram.createForumTopic(currentGroupId, safeTitle);
+        targetTopicId = topic.message_thread_id;
+        await saveMapping({
+          waId: waJid,
+          topicId: targetTopicId,
+          chatName: safeTitle,
+          isGroup: false
+        });
+      } else {
+        const safeTitle = sanitizeTopicName(`${name} (+${cleanDigits})`);
+        await bot.telegram.editForumTopic(currentGroupId, targetTopicId, { name: safeTitle }).catch(() => {});
         await updateMappingName(waJid, safeTitle);
       }
 
+      const topicUrl = `https://t.me/c/${cleanGroupId}/${targetTopicId}`;
       await ctx.reply(
-        `✅ <b>Contact Saved!</b>\n\n` +
+        `✅ <b>Contact Saved & Topic Linked!</b>\n\n` +
         `• <b>Name:</b> ${name}\n` +
-        `• <b>Phone:</b> +${cleanDigits}\n` +
-        `You can now start a chat with <code>/chat ${cleanDigits}</code> or find them with <code>/search ${name}</code>.`,
+        `• <b>Phone:</b> +${cleanDigits}\n\n` +
+        `👉 <a href="${topicUrl}"><b>Click here to open WhatsApp Topic for ${name}</b></a>`,
         getReplyExtra(ctx, { parse_mode: 'HTML' })
       );
     } catch (err) {
@@ -378,11 +392,20 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       }));
     }
 
+    const cleanGroupId = currentGroupId.replace('-100', '');
     let response = `🔍 <b>Found ${results.length} contact(s):</b>\n\n`;
     for (const c of results) {
       const phone = c.phone_number || c.wa_id.split('@')[0];
-      response += `• <b>${c.name || 'Unknown'}</b>: <code>${phone}</code>\n`;
-      response += `  └ Start chat: <code>/chat ${phone} ${c.name || ''}</code>\n\n`;
+      const existing = await getMappingByWaId(c.wa_id);
+      const name = c.name || 'Unknown';
+
+      response += `• <b>${name}</b>: <code>+${phone}</code>\n`;
+      if (existing) {
+        const topicUrl = `https://t.me/c/${cleanGroupId}/${existing.tg_topic_id}`;
+        response += `  └ 👉 <a href="${topicUrl}">Open Topic (${existing.chat_name})</a>\n\n`;
+      } else {
+        response += `  └ Start chat: <code>/chat ${phone} ${name}</code>\n\n`;
+      }
     }
 
     await ctx.reply(response, getReplyExtra(ctx, {
@@ -406,6 +429,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       return ctx.reply('❌ Invalid phone number. Please include the full country code (digits only).', getReplyExtra(ctx));
     }
 
+    const cleanGroupId = currentGroupId.replace('-100', '');
     const sock = getWaSocket();
     if (!sock) {
       return ctx.reply('❌ WhatsApp is currently disconnected. Please wait for reconnection.', getReplyExtra(ctx));
@@ -426,9 +450,10 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
     // 2. Check if a topic already exists
     const existing = await getMappingByWaId(waJid);
     if (existing) {
+      const topicUrl = `https://t.me/c/${cleanGroupId}/${existing.tg_topic_id}`;
       return ctx.reply(
-        `💬 A topic already exists for this contact: <b>${existing.chat_name}</b>\n` +
-        `Navigate to Topic ID: <code>${existing.tg_topic_id}</code>`,
+        `💬 A topic already exists for this contact: <b>${existing.chat_name}</b>\n\n` +
+        `👉 <a href="${topicUrl}"><b>Click here to open Topic</b></a>`,
         getReplyExtra(ctx, {
           parse_mode: 'HTML'
         })
@@ -436,23 +461,30 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
     }
 
     // 3. Create Forum Topic
-    const topicTitle = sanitizeTopicName(nameInput || phoneInput);
+    const topicTitle = sanitizeTopicName(nameInput ? `${nameInput} (+${phoneInput.replace(/[^\d]/g, '')})` : phoneInput);
     try {
       const topic = await bot.telegram.createForumTopic(currentGroupId, topicTitle);
       const topicId = topic.message_thread_id;
 
-      // 4. Save mapping in DB
+      // 4. Save mapping and contact in DB
       await saveMapping({
         waId: waJid,
         topicId,
         chatName: topicTitle,
         isGroup: false
       });
+      if (nameInput) {
+        await saveContact({
+          waId: waJid,
+          name: nameInput,
+          phoneNumber: phoneInput.replace(/[^\d]/g, '')
+        });
+      }
 
       // 5. Send initial welcome in the new topic
       await bot.telegram.sendMessage(
         currentGroupId,
-        `💬 <b>Chat created for ${topicTitle} (${phoneInput})</b>\n` +
+        `💬 <b>Chat created for ${topicTitle}</b>\n` +
         `Any message, document, or media sent here will be sent to WhatsApp.`,
         {
           message_thread_id: topicId,
@@ -465,7 +497,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       if (avatarBuffer) {
         const card = await bot.telegram.sendPhoto(
           currentGroupId,
-          { source: avatarBuffer },
+          { source: avatarBuffer, filename: 'avatar.jpg' },
           {
             message_thread_id: topicId,
             caption: `📸 <b>${topicTitle}</b>\nWhatsApp: <code>${phoneInput}</code>`,
@@ -480,9 +512,11 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
         }
       }
 
-      // 6. Confirm in General topic
+      // 6. Confirm in General topic with clickable link
+      const topicUrl = `https://t.me/c/${cleanGroupId}/${topicId}`;
       await ctx.reply(
-        `✅ Created new topic: <b>${topicTitle}</b>! You can now start typing in that topic.`,
+        `✅ Created new topic: <b>${topicTitle}</b>!\n\n` +
+        `👉 <a href="${topicUrl}"><b>Click here to open WhatsApp Topic for ${topicTitle}</b></a>`,
         getReplyExtra(ctx, {
           parse_mode: 'HTML'
         })
@@ -518,9 +552,108 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       return;
     }
 
-    // Ignore commands or messages sent in the General Control Topic
+    // Check if message was sent in the General Control Topic
     if (!topicId || topicId === currentGeneralTopicId) {
-      return;
+      const cleanGroupId = currentGroupId.replace('-100', '');
+
+      // 1. If user shared a contact card in General topic
+      if (msg.contact) {
+        const phone = msg.contact.phone_number.replace(/[^\d]/g, '');
+        const name = [msg.contact.first_name, msg.contact.last_name].filter(Boolean).join(' ') || `Contact ${phone.slice(-4)}`;
+        const waJid = `${phone}@s.whatsapp.net`;
+
+        await saveContact({
+          waId: waJid,
+          name,
+          phoneNumber: phone
+        });
+
+        let mapping = await getMappingByWaId(waJid);
+        let targetTopicId = mapping?.tg_topic_id;
+
+        if (!targetTopicId) {
+          const topicTitle = sanitizeTopicName(`${name} (+${phone})`);
+          try {
+            const newTopic = await bot.telegram.createForumTopic(currentGroupId, topicTitle);
+            targetTopicId = newTopic.message_thread_id;
+            await saveMapping({
+              waId: waJid,
+              topicId: targetTopicId,
+              chatName: topicTitle,
+              isGroup: false
+            });
+
+            await bot.telegram.sendMessage(
+              currentGroupId,
+              `💬 <b>Chat created for ${topicTitle}</b>\nAny message sent here will be delivered to WhatsApp.`,
+              { message_thread_id: targetTopicId, parse_mode: 'HTML' }
+            ).catch(() => {});
+          } catch (err) {
+            return ctx.reply(`❌ Failed to create topic: ${err.message}`, getReplyExtra(ctx));
+          }
+        }
+
+        const topicUrl = `https://t.me/c/${cleanGroupId}/${targetTopicId}`;
+        return ctx.reply(
+          `👤 <b>Contact:</b> ${name}\n` +
+          `📞 <b>Phone:</b> +${phone}\n\n` +
+          `👉 <a href="${topicUrl}"><b>Click here to open WhatsApp Topic for ${name}</b></a>`,
+          getReplyExtra(ctx, { parse_mode: 'HTML' })
+        );
+      }
+
+      // 2. If user typed a phone number directly in General topic
+      const text = msg.text?.trim() || '';
+      const cleanDigits = text.replace(/[^\d]/g, '');
+      if (cleanDigits.length >= 8 && cleanDigits.length <= 15 && (/^\+?\d+$/.test(text) || text.startsWith('07') || text.startsWith('01'))) {
+        let phone = cleanDigits;
+        if (text.startsWith('07') || text.startsWith('01')) {
+          phone = '254' + cleanDigits.slice(1);
+        }
+
+        const waJid = `${phone}@s.whatsapp.net`;
+        const existingContact = await getContact(phone);
+        const contactName = existingContact?.name || `Contact ${phone.slice(-4)}`;
+
+        let mapping = await getMappingByWaId(waJid);
+        let targetTopicId = mapping?.tg_topic_id;
+
+        if (!targetTopicId) {
+          const topicTitle = sanitizeTopicName(`${contactName} (+${phone})`);
+          try {
+            const newTopic = await bot.telegram.createForumTopic(currentGroupId, topicTitle);
+            targetTopicId = newTopic.message_thread_id;
+            await saveMapping({
+              waId: waJid,
+              topicId: targetTopicId,
+              chatName: topicTitle,
+              isGroup: false
+            });
+            await saveContact({
+              waId: waJid,
+              name: contactName,
+              phoneNumber: phone
+            });
+
+            await bot.telegram.sendMessage(
+              currentGroupId,
+              `💬 <b>Chat created for ${topicTitle}</b>\nAny message sent here will be delivered to WhatsApp.`,
+              { message_thread_id: targetTopicId, parse_mode: 'HTML' }
+            ).catch(() => {});
+          } catch (err) {
+            return ctx.reply(`❌ Failed to create topic: ${err.message}`, getReplyExtra(ctx));
+          }
+        }
+
+        const topicUrl = `https://t.me/c/${cleanGroupId}/${targetTopicId}`;
+        return ctx.reply(
+          `📱 <b>WhatsApp Topic for +${phone}:</b>\n\n` +
+          `👉 <a href="${topicUrl}"><b>Click here to open WhatsApp Topic for ${contactName}</b></a>`,
+          getReplyExtra(ctx, { parse_mode: 'HTML' })
+        );
+      }
+
+      return; // Ignore other text in General
     }
 
     // 1. Look up WhatsApp mapping for this topic
@@ -690,6 +823,39 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
             {
               video: buffer,
               caption: msg.caption || ''
+            },
+            { quoted }
+          )
+        );
+      }
+      // --- CONTACT CARD ---
+      else if (msg.contact) {
+        mediaType = 'contact';
+        const phone = msg.contact.phone_number.replace(/[^\d]/g, '');
+        const name = [msg.contact.first_name, msg.contact.last_name].filter(Boolean).join(' ') || `Contact ${phone.slice(-4)}`;
+        contentText = `[Contact: ${name} (+${phone})]`;
+
+        await saveContact({
+          waId: `${phone}@s.whatsapp.net`,
+          name,
+          phoneNumber: phone
+        });
+
+        const vcard =
+          'BEGIN:VCARD\n' +
+          'VERSION:3.0\n' +
+          `FN:${name}\n` +
+          `TEL;type=CELL;type=VOICE;waid=${phone}:+${phone}\n` +
+          'END:VCARD';
+
+        sentMsg = await sendWithWaRetry(() =>
+          sock.sendMessage(
+            targetJid,
+            {
+              contacts: {
+                displayName: name,
+                contacts: [{ vcard }]
+              }
             },
             { quoted }
           )

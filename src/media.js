@@ -1,4 +1,56 @@
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, extractMessageContent } from '@whiskeysockets/baileys';
+
+/**
+ * Unwrap nested WhatsApp messages (ephemeral, viewOnce, documentWithCaption, etc.)
+ */
+export function unwrapWaMessage(rawMessage) {
+  if (!rawMessage) return {};
+  let msg = rawMessage;
+
+  while (
+    msg?.ephemeralMessage?.message ||
+    msg?.viewOnceMessage?.message ||
+    msg?.viewOnceMessageV2?.message ||
+    msg?.viewOnceMessageV2Extension?.message ||
+    msg?.documentWithCaptionMessage?.message ||
+    msg?.templateMessage?.hydratedTemplate ||
+    msg?.templateMessage?.hydratedFourRowTemplate
+  ) {
+    if (msg.ephemeralMessage?.message) msg = msg.ephemeralMessage.message;
+    else if (msg.viewOnceMessage?.message) msg = msg.viewOnceMessage.message;
+    else if (msg.viewOnceMessageV2?.message) msg = msg.viewOnceMessageV2.message;
+    else if (msg.viewOnceMessageV2Extension?.message) msg = msg.viewOnceMessageV2Extension.message;
+    else if (msg.documentWithCaptionMessage?.message) msg = msg.documentWithCaptionMessage.message;
+    else break;
+  }
+
+  return msg;
+}
+
+/**
+ * Parse name and phone number from a WhatsApp vCard string
+ */
+export function parseVCard(vcard, fallbackName = '') {
+  let name = fallbackName || 'Contact';
+  let phone = null;
+
+  if (vcard) {
+    const fnMatch = vcard.match(/FN:(.+)/i);
+    if (fnMatch) name = fnMatch[1].trim();
+
+    const waidMatch = vcard.match(/waid=(\d+)/i);
+    if (waidMatch) {
+      phone = waidMatch[1].trim();
+    } else {
+      const telMatch = vcard.match(/TEL[^:]*:(.+)/i);
+      if (telMatch) {
+        phone = telMatch[1].replace(/[^\d]/g, '').trim();
+      }
+    }
+  }
+
+  return { name, phone };
+}
 
 /**
  * Clean phone number and convert to WhatsApp JID
@@ -26,8 +78,9 @@ export function sanitizeTopicName(name) {
  */
 export async function downloadWaMedia(msg) {
   try {
+    const unwrapped = unwrapWaMessage(msg.message);
     const buffer = await downloadMediaMessage(
-      msg,
+      { key: msg.key, message: unwrapped },
       'buffer',
       {},
       {

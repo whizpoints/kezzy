@@ -22,7 +22,7 @@ import {
   getContactsWithPhone,
   updateContactLid
 } from './db.js';
-import { sanitizeTopicName, downloadWaMedia, getProfilePictureBuffer } from './media.js';
+import { sanitizeTopicName, downloadWaMedia, getProfilePictureBuffer, unwrapWaMessage, parseVCard } from './media.js';
 
 let sockInstance = null;
 let activeAuthCleanup = null;
@@ -32,6 +32,7 @@ let latestQrBuffer = null;
 let isInitializingWa = false;
 let isRelinkingWa = false;
 let lastRelinkTime = 0;
+let lastAnnounceTime = 0;
 
 let connectionStatus = {
   connected: false,
@@ -82,6 +83,85 @@ export function getWaSocket() {
 
 export function getWaStatus() {
   return connectionStatus;
+}
+
+/**
+ * Shared helper to extract and persist contact metadata from Baileys events
+ */
+export async function processContactData(c) {
+  if (!c || !c.id) return null;
+  const savedName = c.name || c.verifiedName || null;
+  const pushName = c.notify || null;
+  const bestName = savedName || pushName || null;
+
+  let phone = null;
+  let lid = null;
+
+  // Extract phone number from id or jid
+  if (c.id.endsWith('@s.whatsapp.net')) {
+    phone = c.id.split('@')[0].split(':')[0];
+  } else if (c.jid && c.jid.endsWith('@s.whatsapp.net')) {
+    phone = c.jid.split('@')[0].split(':')[0];
+  }
+
+  // Extract LID from id or lid
+  if (c.id.endsWith('@lid')) {
+    lid = c.id.split(':')[0] + '@lid';
+  } else if (c.lid && c.lid.endsWith('@lid')) {
+    lid = c.lid.split(':')[0] + '@lid';
+  }
+
+  if (c.phoneNumber) {
+    phone = String(c.phoneNumber).replace(/[^\d]/g, '');
+  }
+
+  await saveContact({
+    waId: c.id,
+    name: bestName,
+    phoneNumber: phone,
+    lid
+  });
+
+  return { waId: c.id, name: bestName, phone, lid };
+}
+
+/**
+ * Resolve display name for message sender in groups and private chats
+ * Priority 1: User's saved address book name
+ * Priority 2: Public WhatsApp push name (+ phone)
+ * Priority 3: Phone number (+254...)
+ * Priority 4: Clean fallback
+ */
+export async function resolveSenderDisplayName(senderJid, pushName = null) {
+  if (!senderJid) return pushName || 'Unknown';
+
+  const contact = await getContact(senderJid);
+  const savedName = contact?.name && contact.name.trim();
+  const rawPhone = contact?.phone_number || (senderJid.endsWith('@s.whatsapp.net') ? senderJid.split('@')[0].split(':')[0] : null);
+  const validPhone = rawPhone && rawPhone.length >= 7 && rawPhone !== '0' ? ` (+${rawPhone})` : '';
+
+  // 1. Saved Address Book Contact Name (Highest Priority)
+  if (savedName) {
+    return `${savedName}${validPhone}`;
+  }
+
+  // 2. WhatsApp Public Push Name
+  if (pushName && pushName.trim()) {
+    return `${pushName.trim()}${validPhone}`;
+  }
+
+  // 3. Known Phone Number
+  if (validPhone) {
+    return `+${rawPhone}`;
+  }
+
+  // 4. Fallback for unmapped LID
+  const cleanId = senderJid.split('@')[0].split(':')[0];
+  if (senderJid.endsWith('@lid')) {
+    return `WhatsApp User (${cleanId.slice(-4)})`;
+  }
+
+  return cleanId || 'Unknown';
 }
 
 /**
@@ -169,6 +249,9 @@ export async function syncContactsAndTopics(sock, bot, groupId) {
 
   console.log('🔄 Auditing forum topic titles and contact mappings...');
 
+  // Pre-create and ensure Storage Vault Topic exists on startup
+  await getOrCreateStorageTopic(bot, groupId);
+
   // 1. Register own account LID
   if (sock.user) {
     const myPhone = sock.user.id?.split(':')[0]?.split('@')[0];
@@ -191,15 +274,7 @@ export async function syncContactsAndTopics(sock, bot, groupId) {
     }
   }
 
-  // 2. Link known active chats where contact is known
-  await saveContact({
-    waId: '38105386102945@lid',
-    name: 'Cucu shanny',
-    phoneNumber: '254725415375',
-    lid: '38105386102945@lid'
-  });
-
-  // 3. Rename existing Telegram Forum Topics that have raw digits, LIDs, or (+0)
+  // 2. Audit existing Telegram Forum Topics
   const allMappings = await getAllMappings();
   console.log(`📋 Auditing ${allMappings.length} forum topics for name updates...`);
   let renamedCount = 0;
@@ -209,19 +284,25 @@ export async function syncContactsAndTopics(sock, bot, groupId) {
     const resolvedTitle = await resolveChatTitle(sock, mapping.wa_id);
     const safeTitle = sanitizeTopicName(resolvedTitle);
 
-    const isDigitName = /^\d+$/.test(mapping.chat_name) || mapping.chat_name.includes('(+0)');
-    const isLidFallback = mapping.chat_name.startsWith('WhatsApp User');
-    const hasBetterName = safeTitle !== mapping.chat_name && (isDigitName || isLidFallback || !mapping.chat_name.includes('(+'));
+    const isGeneric =
+      mapping.chat_name.startsWith('WhatsApp Contact') ||
+      mapping.chat_name.startsWith('WhatsApp User') ||
+      /^\d+$/.test(mapping.chat_name) ||
+      mapping.chat_name.includes('(+0)');
+
+    const hasBetterName = safeTitle !== mapping.chat_name && (isGeneric || (!mapping.chat_name.includes('(+') && safeTitle.includes('(+')));
 
     if (hasBetterName) {
       try {
-        await bot.telegram.editForumTopic(groupId, mapping.tg_topic_id, {
-          name: safeTitle
-        });
+        await retryTelegramCall(async () => {
+          await bot.telegram.editForumTopic(groupId, mapping.tg_topic_id, {
+            name: safeTitle
+          });
+        }, 2, 800);
         await updateMappingName(mapping.wa_id, safeTitle);
         renamedCount++;
         console.log(`✨ Renamed topic ${mapping.tg_topic_id} from "${mapping.chat_name}" to "${safeTitle}"`);
-        await new Promise(r => setTimeout(r, 500)); // Respect Telegram rate limits
+        await new Promise(r => setTimeout(r, 600)); // Respect Telegram rate limits
       } catch (err) {
         if (!err.message?.includes('TOPIC_NOT_MODIFIED')) {
           console.warn(`Could not rename topic ${mapping.tg_topic_id}:`, err.message);
@@ -482,7 +563,7 @@ export async function initWhatsApp({
         if (cached) return cached;
         return undefined;
       },
-      syncFullHistory: false,
+      syncFullHistory: true,
       shouldSyncHistoryMessage: () => true,
       defaultQueryTimeoutMs: 60000
     });
@@ -574,32 +655,40 @@ export async function initWhatsApp({
           } catch (_) {}
         }
 
-let lastAnnounceTime = 0;
-
-      // Only announce once every 10 minutes to prevent flooding Telegram chat on reboots/reconnects
-      const now = Date.now();
-      if (!hasAnnouncedConnected && now - lastAnnounceTime > 600000) {
-        hasAnnouncedConnected = true;
-        lastAnnounceTime = now;
-        await bot.telegram.sendMessage(
-          groupId,
-          `🟢 <b>WhatsApp Bridge Online:</b> Logged in as <code>${sock.user.id.split(':')[0]}</code>. Ready to route messages.`,
-          getTopicExtra(generalTopicId, {
-            parse_mode: 'HTML'
-          })
-        ).catch(() => {});
-      }
-
-      // Trigger automatic background contact LID resolution, topic renaming, and all groups sync
-      setTimeout(async () => {
+        // Resync Baileys app state to pull full address book and group names
         try {
-          await syncContactsAndTopics(sock, bot, groupId);
-          await syncAllGroups(sock, bot, groupId);
-        } catch (err) {
-          console.warn('Initial background sync error:', err.message);
+          await sock.resyncAppState(['critical_unblock_low', 'regular_high', 'regular_low', 'critical_block', 'regular'], false);
+        } catch (syncErr) {
+          console.warn('App state resync warning:', syncErr.message);
         }
-      }, 4000);
-    }
+
+        // Pre-create and ensure Storage Vault Topic exists on startup
+        await getOrCreateStorageTopic(bot, groupId);
+
+        // Only announce once every 10 minutes to prevent flooding Telegram chat on reboots/reconnects
+        const now = Date.now();
+        if (!hasAnnouncedConnected && now - lastAnnounceTime > 600000) {
+          hasAnnouncedConnected = true;
+          lastAnnounceTime = now;
+          await bot.telegram.sendMessage(
+            groupId,
+            `🟢 <b>WhatsApp Bridge Online:</b> Logged in as <code>${sock.user.id.split(':')[0]}</code>. Ready to route messages.`,
+            getTopicExtra(generalTopicId, {
+              parse_mode: 'HTML'
+            })
+          ).catch(() => {});
+        }
+
+        // Trigger automatic background contact LID resolution, topic renaming, and all groups sync
+        setTimeout(async () => {
+          try {
+            await syncContactsAndTopics(sock, bot, groupId);
+            await syncAllGroups(sock, bot, groupId);
+          } catch (err) {
+            console.warn('Initial background sync error:', err.message);
+          }
+        }, 4000);
+      }
 
     if (connection === 'close') {
       connectionStatus.connected = false;
@@ -650,29 +739,13 @@ let lastAnnounceTime = 0;
   // ================= 1. SYNC CONTACTS & PHONE NUMBER SHARES ================= //
   sock.ev.on('contacts.upsert', async (contacts) => {
     for (const c of contacts) {
-      if (!c.id) continue;
-      const savedName = c.name || c.verifiedName || null;
-      const pushName = c.notify || null;
-      const bestName = savedName || pushName;
+      await processContactData(c);
+    }
+  });
 
-      let phone = null;
-      let lid = null;
-
-      if (c.id.endsWith('@s.whatsapp.net')) {
-        phone = c.id.split('@')[0]?.split(':')[0];
-      } else if (c.id.endsWith('@lid')) {
-        lid = c.id;
-      }
-
-      if (c.lid) lid = c.lid;
-      if (c.phoneNumber) phone = c.phoneNumber;
-
-      await saveContact({
-        waId: c.id,
-        name: bestName,
-        phoneNumber: phone,
-        lid
-      });
+  sock.ev.on('contacts.update', async (updates) => {
+    for (const c of updates) {
+      await processContactData(c);
     }
   });
 
@@ -713,29 +786,14 @@ let lastAnnounceTime = 0;
       const waId = chat.id;
       if (!waId || waId === 'status@broadcast' || waId.includes('@newsletter')) continue;
 
-      const pnJid = chat.pnJid;
-      const lidJid = chat.lidJid || (chat.id.endsWith('@lid') ? chat.id : null);
-      const phone = pnJid ? pnJid.split('@')[0]?.split(':')[0] : (chat.id.endsWith('@s.whatsapp.net') ? chat.id.split('@')[0]?.split(':')[0] : null);
-      const name = chat.name || chat.displayName || null;
+      await processContactData({
+        id: chat.id,
+        jid: chat.pnJid || chat.id,
+        lid: chat.lidJid || (chat.id.endsWith('@lid') ? chat.id : null),
+        name: chat.name || chat.displayName || null
+      });
 
-      if (phone || lidJid || name) {
-        await saveContact({
-          waId: chat.id,
-          name,
-          phoneNumber: phone,
-          lid: lidJid
-        });
-        if (lidJid && (phone || name)) {
-          await saveContact({
-            waId: lidJid,
-            name,
-            phoneNumber: phone,
-            lid: lidJid
-          });
-        }
-      }
-
-      // Upgrade existing topic name if it currently has raw digits or (+0)
+      // Upgrade existing topic name if it currently has raw digits, (+0), or generic fallback
       const existing = await getMappingByWaId(waId);
       if (existing) {
         if (/^\d+$/.test(existing.chat_name) || existing.chat_name.includes('(+0)') || existing.chat_name.startsWith('WhatsApp')) {
@@ -753,6 +811,18 @@ let lastAnnounceTime = 0;
     }
   });
 
+  sock.ev.on('chats.update', async (chats) => {
+    for (const chat of chats) {
+      if (!chat.id) continue;
+      await processContactData({
+        id: chat.id,
+        jid: chat.pnJid || chat.id,
+        lid: chat.lidJid || (chat.id.endsWith('@lid') ? chat.id : null),
+        name: chat.name || chat.displayName || null
+      });
+    }
+  });
+
   // ================= 3. HISTORICAL MESSAGES CATCHUP WITH REAL MEDIA ================= //
   sock.ev.on('messaging-history.set', async ({ chats, contacts, messages, isLatest }) => {
     try {
@@ -762,50 +832,19 @@ let lastAnnounceTime = 0;
       if (chats && chats.length > 0) {
         for (const chat of chats) {
           if (!chat.id) continue;
-          const pnJid = chat.pnJid;
-          const lidJid = chat.lidJid || (chat.id.endsWith('@lid') ? chat.id : null);
-          const phone = pnJid ? pnJid.split('@')[0]?.split(':')[0] : (chat.id.endsWith('@s.whatsapp.net') ? chat.id.split('@')[0]?.split(':')[0] : null);
-          const name = chat.name || chat.displayName || null;
-
-          if (phone || lidJid || name) {
-            try {
-              await saveContact({
-                waId: chat.id,
-                name,
-                phoneNumber: phone,
-                lid: lidJid
-              });
-              if (lidJid && pnJid) {
-                await saveContact({
-                  waId: lidJid,
-                  name,
-                  phoneNumber: phone,
-                  lid: lidJid
-                });
-              }
-            } catch (_) {}
-          }
+          await processContactData({
+            id: chat.id,
+            jid: chat.pnJid || chat.id,
+            lid: chat.lidJid || (chat.id.endsWith('@lid') ? chat.id : null),
+            name: chat.name || chat.displayName || null
+          });
         }
       }
 
       // 2. Process contacts address book
       if (contacts && contacts.length > 0) {
         for (const c of contacts) {
-          if (!c.id) continue;
-          const savedName = c.name || c.verifiedName || null;
-          const pushName = c.notify || null;
-          const bestName = savedName || pushName;
-          const phone = c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0]?.split(':')[0] : (c.phoneNumber || null);
-          const lid = c.lid || (c.id.endsWith('@lid') ? c.id : null);
-
-          try {
-            await saveContact({
-              waId: c.id,
-              name: bestName,
-              phoneNumber: phone,
-              lid
-            });
-          } catch (_) {}
+          await processContactData(c);
         }
       }
 
@@ -927,8 +966,11 @@ let lastAnnounceTime = 0;
       const recentSlice = chatMsgs.slice(-100);
 
       for (const m of recentSlice) {
+        const unwrapped = unwrapWaMessage(m.message);
+        if (!unwrapped || Object.keys(unwrapped).length === 0) continue;
+
         const alreadySaved = await getMessageHistoryByWaId(m.key.id);
-        const hasMedia = !!(m.message.imageMessage || m.message.documentMessage || m.message.audioMessage || m.message.videoMessage);
+        const hasMedia = !!(unwrapped.imageMessage || unwrapped.documentMessage || unwrapped.audioMessage || unwrapped.videoMessage || unwrapped.contactMessage || unwrapped.contactsArrayMessage);
 
         // If already saved with actual binary media, skip. If saved previously with placeholder text, allow media backfill!
         if (alreadySaved && (!hasMedia || alreadySaved.media_type !== 'text')) {
@@ -936,8 +978,8 @@ let lastAnnounceTime = 0;
         }
 
         const isFromMe = !!m.key.fromMe;
-        const senderJid = isGroup ? m.key.participant : chatJid;
-        const senderName = m.pushName || (senderJid ? senderJid.split('@')[0] : 'Unknown');
+        const senderJid = isGroup ? (m.key.participant || m.participant) : chatJid;
+        const senderName = await resolveSenderDisplayName(senderJid, m.pushName);
 
         let timeStr = '';
         if (m.messageTimestamp) {
@@ -953,7 +995,7 @@ let lastAnnounceTime = 0;
           prefix += `<b>[${senderName}]:</b>\n`;
         }
 
-        const msgContent = m.message;
+        const msgContent = unwrapped;
         let sentTgMsg = null;
         let mediaType = 'text';
         let bodyText = '';
@@ -981,7 +1023,7 @@ let lastAnnounceTime = 0;
             const buffer = await downloadWaMedia(m);
             if (buffer) {
               sentTgMsg = await sendWithRetry(() =>
-                bot.telegram.sendPhoto(groupId, { source: buffer }, {
+                bot.telegram.sendPhoto(groupId, { source: buffer, filename: 'photo.jpg' }, {
                   message_thread_id: topicId,
                   caption,
                   parse_mode: 'HTML'
@@ -992,6 +1034,7 @@ let lastAnnounceTime = 0;
               await mirrorMediaToStorage(bot, groupId, {
                 mediaType: 'image',
                 buffer,
+                filename: 'photo.jpg',
                 caption: bodyText,
                 chatTitle: mapping.chat_name,
                 senderName: isFromMe ? 'You' : senderName,
@@ -1099,7 +1142,7 @@ let lastAnnounceTime = 0;
             const buffer = await downloadWaMedia(m);
             if (buffer) {
               sentTgMsg = await sendWithRetry(() =>
-                bot.telegram.sendVideo(groupId, { source: buffer }, {
+                bot.telegram.sendVideo(groupId, { source: buffer, filename: 'video.mp4' }, {
                   message_thread_id: topicId,
                   caption,
                   parse_mode: 'HTML'
@@ -1110,6 +1153,7 @@ let lastAnnounceTime = 0;
               await mirrorMediaToStorage(bot, groupId, {
                 mediaType: 'video',
                 buffer,
+                filename: 'video.mp4',
                 caption: bodyText,
                 chatTitle: mapping.chat_name,
                 senderName: isFromMe ? 'You' : senderName,
@@ -1123,6 +1167,42 @@ let lastAnnounceTime = 0;
                   `${prefix}🎥 <i>[Video - WhatsApp media expired]</i>\n${escapeHtml(bodyText)}`.trim(),
                   { message_thread_id: topicId, parse_mode: 'HTML' }
                 )
+              );
+            }
+          }
+          // --- 6. Contact Card ---
+          else if (msgContent.contactMessage || msgContent.contactsArrayMessage) {
+            mediaType = 'contact';
+            const contactsList = msgContent.contactsArrayMessage?.contacts || (msgContent.contactMessage ? [msgContent.contactMessage] : []);
+            for (const card of contactsList) {
+              const parsed = parseVCard(card.vcard, card.displayName);
+              if (parsed.phone) {
+                await saveContact({
+                  waId: `${parsed.phone}@s.whatsapp.net`,
+                  name: parsed.name,
+                  phoneNumber: parsed.phone
+                });
+              }
+
+              let topicLink = '';
+              if (parsed.phone) {
+                const contactMapping = await getMappingByWaId(`${parsed.phone}@s.whatsapp.net`);
+                if (contactMapping) {
+                  const cleanGroupId = String(groupId).replace(/^-100/, '');
+                  topicLink = `\n👉 <a href="https://t.me/c/${cleanGroupId}/${contactMapping.tg_topic_id}">Open WhatsApp Topic</a>`;
+                }
+              }
+
+              const formatted = `${prefix}👤 <b>Contact Shared:</b>\n` +
+                `• <b>Name:</b> ${escapeHtml(parsed.name)}\n` +
+                `• <b>Phone:</b> <code>+${escapeHtml(parsed.phone || 'N/A')}</code>` +
+                topicLink;
+
+              sentTgMsg = await sendWithRetry(() =>
+                bot.telegram.sendMessage(groupId, formatted, {
+                  message_thread_id: topicId,
+                  parse_mode: 'HTML'
+                })
               );
             }
           }
@@ -1154,7 +1234,7 @@ let lastAnnounceTime = 0;
 
   // ================= 4. INCOMING & PHONE-OUTGOING MESSAGES ================= //
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const m of messages) {
       if (!m.message) continue;
@@ -1173,9 +1253,12 @@ let lastAnnounceTime = 0;
         continue;
       }
 
+      const unwrapped = unwrapWaMessage(m.message);
+      if (!unwrapped || Object.keys(unwrapped).length === 0) continue;
+
       const isGroup = remoteJid.endsWith('@g.us');
-      const senderJid = isGroup ? m.key.participant : remoteJid;
-      const senderName = m.pushName || (senderJid ? senderJid.split('@')[0] : 'Unknown');
+      const senderJid = isGroup ? (m.key.participant || m.participant) : remoteJid;
+      const senderName = await resolveSenderDisplayName(senderJid, m.pushName);
 
       // 1. Find or create Forum Topic
       let mapping = await getMappingByWaId(remoteJid);
@@ -1265,7 +1348,7 @@ let lastAnnounceTime = 0;
         let mediaType = 'text';
         let bodyText = '';
 
-        const msgContent = m.message;
+        const msgContent = unwrapped;
 
         // Self-healing topic recovery wrapper
         const sendWithTopicRecovery = async (sendFn) => {
@@ -1300,7 +1383,7 @@ let lastAnnounceTime = 0;
               if (avatarBuffer) {
                 const card = await bot.telegram.sendPhoto(
                   groupId,
-                  { source: avatarBuffer },
+                  { source: avatarBuffer, filename: 'avatar.jpg' },
                   {
                     message_thread_id: newTopicId,
                     caption: `📸 <b>${safeTitle}</b>\nWhatsApp: <code>${remoteJid.split('@')[0]}</code>`,
@@ -1348,7 +1431,7 @@ let lastAnnounceTime = 0;
             sentTgMsg = await sendWithTopicRecovery((tid) =>
               bot.telegram.sendPhoto(
                 groupId,
-                { source: buffer },
+                { source: buffer, filename: 'photo.jpg' },
                 {
                   message_thread_id: tid,
                   caption: `${prefix}${escapeHtml(bodyText)}`,
@@ -1359,6 +1442,7 @@ let lastAnnounceTime = 0;
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'image',
               buffer,
+              filename: 'photo.jpg',
               caption: bodyText,
               chatTitle: mapping.chat_name,
               senderName: isFromMe ? 'You' : senderName,
@@ -1406,7 +1490,7 @@ let lastAnnounceTime = 0;
               sentTgMsg = await sendWithTopicRecovery((tid) =>
                 bot.telegram.sendVoice(
                   groupId,
-                  { source: buffer },
+                  { source: buffer, filename: 'voice.ogg' },
                   {
                     message_thread_id: tid,
                     caption: prefix ? prefix.trim() : undefined,
@@ -1430,7 +1514,7 @@ let lastAnnounceTime = 0;
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: isVoice ? 'voice' : 'audio',
               buffer,
-              filename: 'audio.mp3',
+              filename: isVoice ? 'voice.ogg' : 'audio.mp3',
               caption: '',
               chatTitle: mapping.chat_name,
               senderName: isFromMe ? 'You' : senderName,
@@ -1447,7 +1531,7 @@ let lastAnnounceTime = 0;
             sentTgMsg = await sendWithTopicRecovery((tid) =>
               bot.telegram.sendVideo(
                 groupId,
-                { source: buffer },
+                { source: buffer, filename: 'video.mp4' },
                 {
                   message_thread_id: tid,
                   caption: `${prefix}${escapeHtml(bodyText)}`,
@@ -1458,6 +1542,7 @@ let lastAnnounceTime = 0;
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'video',
               buffer,
+              filename: 'video.mp4',
               caption: bodyText,
               chatTitle: mapping.chat_name,
               senderName: isFromMe ? 'You' : senderName,
@@ -1480,6 +1565,42 @@ let lastAnnounceTime = 0;
                   parse_mode: 'HTML'
                 }
               )
+            );
+          }
+        }
+        // --- 7. Contact Card Message ---
+        else if (msgContent.contactMessage || msgContent.contactsArrayMessage) {
+          mediaType = 'contact';
+          const contactsList = msgContent.contactsArrayMessage?.contacts || (msgContent.contactMessage ? [msgContent.contactMessage] : []);
+          for (const card of contactsList) {
+            const parsed = parseVCard(card.vcard, card.displayName);
+            if (parsed.phone) {
+              await saveContact({
+                waId: `${parsed.phone}@s.whatsapp.net`,
+                name: parsed.name,
+                phoneNumber: parsed.phone
+              });
+            }
+
+            let topicLink = '';
+            if (parsed.phone) {
+              const contactMapping = await getMappingByWaId(`${parsed.phone}@s.whatsapp.net`);
+              if (contactMapping) {
+                const cleanGroupId = String(groupId).replace(/^-100/, '');
+                topicLink = `\n\n👉 <a href="https://t.me/c/${cleanGroupId}/${contactMapping.tg_topic_id}"><b>Click here to open WhatsApp Topic for ${escapeHtml(parsed.name)}</b></a>`;
+              }
+            }
+
+            const formatted = `${prefix}👤 <b>Contact Shared:</b>\n` +
+              `• <b>Name:</b> ${escapeHtml(parsed.name)}\n` +
+              `• <b>Phone:</b> <code>+${escapeHtml(parsed.phone || 'N/A')}</code>` +
+              topicLink;
+
+            sentTgMsg = await sendWithTopicRecovery((tid) =>
+              bot.telegram.sendMessage(groupId, formatted, {
+                message_thread_id: tid,
+                parse_mode: 'HTML'
+              })
             );
           }
         }

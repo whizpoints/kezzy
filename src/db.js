@@ -198,7 +198,10 @@ export async function saveContact({ waId, name, phoneNumber = null, lid = null }
 
   const cleanLid = lid && lid.includes('@')
     ? `${lid.split('@')[0].split(':')[0]}@${lid.split('@')[1]}`
-    : lid;
+    : (lid ? `${lid.split(':')[0]}@lid` : null);
+
+  const cleanPhone = phoneNumber ? String(phoneNumber).replace(/[^\d]/g, '') : null;
+  const validName = name && name.trim() ? name.trim() : null;
 
   const query = `
     INSERT INTO contacts (wa_id, name, phone_number, lid, updated_at)
@@ -212,29 +215,51 @@ export async function saveContact({ waId, name, phoneNumber = null, lid = null }
   `;
   await client.execute({
     sql: query,
-    args: [cleanWaId, name, phoneNumber, cleanLid]
+    args: [cleanWaId, validName, cleanPhone, cleanLid]
   });
 
   // If lid is present and different from cleanWaId, also index by cleanLid so reverse lookup works instantly
   if (cleanLid && cleanLid !== cleanWaId) {
     await client.execute({
       sql: query,
-      args: [cleanLid, name, phoneNumber, cleanLid]
+      args: [cleanLid, validName, cleanPhone, cleanLid]
     });
+  }
+
+  // Cross-save by phone JID if available
+  if (cleanPhone) {
+    const pnJid = `${cleanPhone}@s.whatsapp.net`;
+    if (pnJid !== cleanWaId && pnJid !== cleanLid) {
+      await client.execute({
+        sql: query,
+        args: [pnJid, validName, cleanPhone, cleanLid]
+      });
+    }
   }
 }
 
 export async function getContact(jidOrLid) {
   if (!jidOrLid) return null;
-  const raw = jidOrLid.trim();
+  const raw = String(jidOrLid).trim();
   const cleanId = raw.includes('@')
     ? `${raw.split('@')[0].split(':')[0]}@${raw.split('@')[1]}`
     : raw.split(':')[0];
+  const digits = raw.replace(/[^\d]/g, '');
 
-  const res = await client.execute({
-    sql: 'SELECT * FROM contacts WHERE wa_id = ? OR lid = ? OR wa_id = ? OR lid = ? LIMIT 1',
-    args: [raw, raw, cleanId, cleanId]
-  });
+  let query = `
+    SELECT * FROM contacts 
+    WHERE wa_id = ? OR lid = ? OR wa_id = ? OR lid = ?
+  `;
+  const args = [raw, raw, cleanId, cleanId];
+
+  if (digits && digits.length >= 6) {
+    query += ` OR phone_number = ? OR wa_id = ? OR wa_id LIKE ?`;
+    args.push(digits, `${digits}@s.whatsapp.net`, `%${digits}%`);
+  }
+
+  query += ` ORDER BY (CASE WHEN name IS NOT NULL AND name != '' THEN 1 ELSE 0 END) DESC, updated_at DESC LIMIT 1`;
+
+  const res = await client.execute({ sql: query, args });
   return res.rows[0] || null;
 }
 
