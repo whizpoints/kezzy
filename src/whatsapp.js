@@ -763,7 +763,6 @@ export async function initWhatsApp({
         }, delay);
       }
     });
-  });
 
   // ================= 1. SYNC CONTACTS & PHONE NUMBER SHARES ================= //
   sock.ev.on('contacts.upsert', async (contacts) => {
