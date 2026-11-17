@@ -267,7 +267,7 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
     const name = contact?.name || chatName.replace(/\s*\(\+.*\)/, '') || 'WhatsApp Contact';
     const phone = contact?.phone_number || (waId.includes('@s.whatsapp.net') ? waId.split('@')[0] : null);
 
-    const buffer = await getProfilePictureBuffer(sock, waId, name);
+    const buffer = await getProfilePictureBuffer(sock, waId, name, phone);
     if (!buffer) return;
 
     const caption =

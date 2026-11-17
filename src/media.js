@@ -178,22 +178,34 @@ export function escapeHtml(text) {
 /**
  * Fetch WhatsApp Profile Picture Buffer for a contact or group with stylish avatar fallback
  */
-export async function getProfilePictureBuffer(sock, jid, contactName = 'WhatsApp Contact') {
-  // 1. Try fetching real WhatsApp profile picture from Baileys if connected
-  if (sock && jid) {
-    try {
-      const url = await sock.profilePictureUrl(jid, 'image');
-      if (url) {
-        const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
-        if (response.ok) {
-          const arrayBuffer = await response.arrayBuffer();
-          return Buffer.from(arrayBuffer);
+export async function getProfilePictureBuffer(sock, jid, contactName = 'WhatsApp Contact', phoneNumber = null) {
+  // 1. Prioritize real Phone JID or Group JID over anonymous @lid
+  const candidateJids = [];
+  if (phoneNumber) {
+    const cleanPhone = String(phoneNumber).replace(/[^\d]/g, '');
+    if (cleanPhone) candidateJids.push(`${cleanPhone}@s.whatsapp.net`);
+  }
+  if (jid) candidateJids.push(jid);
+
+  if (sock) {
+    for (const targetJid of candidateJids) {
+      try {
+        const url = await sock.profilePictureUrl(targetJid, 'image');
+        if (url) {
+          const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+          if (response.ok) {
+            const arrayBuffer = await response.arrayBuffer();
+            if (arrayBuffer.byteLength > 0) {
+              console.log(`📸 Fetched real WhatsApp profile picture for ${targetJid}`);
+              return Buffer.from(arrayBuffer);
+            }
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
   }
 
-  // 2. High-resolution avatar fallback
+  // 2. High-resolution avatar fallback (if no photo or privacy blocked)
   try {
     const palette = ['0088cc', '128C7E', '25D366', '34B7F1', '075E54', '4B6584', '20BF6B', '8854D0'];
     const cleanName = (contactName || 'Contact').replace(/[^\w\s]/gi, '').trim() || 'Contact';
