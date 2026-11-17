@@ -1205,21 +1205,12 @@ export async function initWhatsApp({
       return await retryTelegramCall(fn, maxRetries, 1000);
     };
 
-    // 31 days cutoff timestamp
-    const THIRTY_ONE_DAYS_SEC = 31 * 24 * 60 * 60;
-    const cutoffTimestampSec = Math.floor(Date.now() / 1000) - THIRTY_ONE_DAYS_SEC;
-
-    // Group messages by chat (filter to past 31 days)
+    // Group all historical messages by chat (no cutoff, so all files and school docs in the sync package are pulled)
     const messagesByChat = new Map();
     for (const m of messages) {
       if (!m.message) continue;
       const remoteJid = m.key.remoteJid;
       if (!remoteJid || remoteJid === 'status@broadcast' || remoteJid.includes('@newsletter')) continue;
-
-      const ts = Number(m.messageTimestamp || 0);
-      if (ts > 0 && ts < cutoffTimestampSec) {
-        continue; // Skip messages older than 31 days
-      }
 
       if (!messagesByChat.has(remoteJid)) {
         messagesByChat.set(remoteJid, []);
@@ -1227,7 +1218,7 @@ export async function initWhatsApp({
       messagesByChat.get(remoteJid).push(m);
     }
 
-    // Sort all chats with 31-day activity by most recent message timestamp
+    // Sort all chats with message history by most recent message timestamp
     const activeChats = Array.from(messagesByChat.keys()).sort((a, b) => {
       const msgsA = messagesByChat.get(a) || [];
       const msgsB = messagesByChat.get(b) || [];
@@ -1236,7 +1227,7 @@ export async function initWhatsApp({
       return Number(lastB) - Number(lastA);
     });
 
-    console.log(`⏳ Backfilling ${activeChats.length} active chats & groups (past 31 days) into Telegram topics with full attachments...`);
+    console.log(`⏳ Backfilling ${activeChats.length} chats & groups into Telegram topics with full attachments...`);
 
     for (const chatJid of activeChats) {
       const isGroup = chatJid.endsWith('@g.us');
@@ -2289,7 +2280,11 @@ export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bo
 
   if (activeAuthCleanup) {
     try {
-      activeAuthCleanup();
+      if (typeof activeAuthCleanup.cleanup === 'function') {
+        await activeAuthCleanup.cleanup();
+      } else if (typeof activeAuthCleanup === 'function') {
+        activeAuthCleanup();
+      }
     } catch (_) {}
     activeAuthCleanup = null;
   }

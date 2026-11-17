@@ -410,7 +410,7 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
       return;
     }
     if (onRelink) {
-      await ctx.reply('🔄 <b>Full Reset Initialized:</b> Deleting all forum topics and contacts to start fresh...', getReplyExtra(ctx, { parse_mode: 'HTML' }));
+      await ctx.reply('🔄 <b>Reset Initialized:</b> Resetting session and topics while preserving all address book contacts. Generating a fresh QR code...', getReplyExtra(ctx, { parse_mode: 'HTML' }));
       await onRelink();
     }
   });
