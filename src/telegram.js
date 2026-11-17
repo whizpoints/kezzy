@@ -366,13 +366,14 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
     );
   });
 
-  bot.command('relink', async (ctx) => {
+  bot.command(['relink', 'reset', 'clean'], async (ctx) => {
     // Ignore backlog messages sent while bot was offline
     if (ctx.message?.date && ctx.message.date < botLaunchTime - 30) {
       console.log('⚠️ Ignoring stale /relink command from Telegram backlog.');
       return;
     }
     if (onRelink) {
+      await ctx.reply('🔄 <b>Full Reset Initialized:</b> Deleting all forum topics and contacts to start fresh...', getReplyExtra(ctx, { parse_mode: 'HTML' }));
       await onRelink();
     }
   });

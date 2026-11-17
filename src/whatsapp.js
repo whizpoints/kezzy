@@ -33,6 +33,8 @@ let isInitializingWa = false;
 let isRelinkingWa = false;
 let lastRelinkTime = 0;
 let lastAnnounceTime = 0;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
 
 let connectionStatus = {
   connected: false,
@@ -515,6 +517,12 @@ export async function initWhatsApp({
   groupId,
   generalTopicId = 1
 }) {
+  // Clear any pending reconnect timer
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   if (isInitializingWa) {
     console.log('⚠️ WhatsApp initialization is already in progress, skipping duplicate call.');
     return sockInstance;
@@ -526,6 +534,7 @@ export async function initWhatsApp({
     if (sockInstance) {
       console.log('Cleaning up existing socket instance before re-initializing...');
       try {
+        sockInstance._isClosing = true;
         sockInstance.ev.removeAllListeners();
         sockInstance.end();
       } catch (_) {}
@@ -556,7 +565,7 @@ export async function initWhatsApp({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.macOS('Desktop'),
+      browser: Browsers.ubuntu('Chrome'),
       msgRetryCounterCache,
       getMessage: async (key) => {
         const cached = rawMessageCache.get(key.id);
@@ -575,6 +584,9 @@ export async function initWhatsApp({
 
     // Connection events (QR, Connected, Disconnected)
     sock.ev.on('connection.update', async (update) => {
+      // If this socket was intentionally closed, ignore events from it
+      if (sock._isClosing) return;
+
       const { connection, lastDisconnect, qr } = update;
 
       // Handle QR code generation for linking
@@ -590,10 +602,10 @@ export async function initWhatsApp({
           try {
             const terminalQr = await QRCode.toString(qr, { type: 'terminal', small: true });
             console.log('\n' + terminalQr);
-            console.log('📱 Scan the QR code above or view at /qr to link WhatsApp.\n');
+            console.log('📱 Scan the QR code above or view at https://kezzy.onrender.com/qr to link WhatsApp.\n');
           } catch (_) {}
 
-          const captionText = '📱 <b>Link WhatsApp:</b>\nScan this QR code in <b>WhatsApp > Linked Devices</b> to start the bridge with full history sync.';
+          const captionText = '📱 <b>Link WhatsApp:</b>\nScan this QR code in <b>WhatsApp > Linked Devices</b> to start the bridge.\n\n🌐 <b>Live Web View:</b> https://kezzy.onrender.com/qr';
 
           // If we already sent a QR photo, edit it in-place using editMessageMedia to avoid socket hang ups & spam
           if (connectionStatus.qrMessageId) {
@@ -610,7 +622,7 @@ export async function initWhatsApp({
                     parse_mode: 'HTML'
                   }
                 );
-              }, 3, 1000);
+              }, 2, 800);
               return;
             } catch (editErr) {
               console.warn('Could not edit existing QR message, sending a fresh one:', editErr.message);
@@ -631,7 +643,7 @@ export async function initWhatsApp({
                 parse_mode: 'HTML'
               })
             );
-          }, 3, 1000);
+          }, 2, 800);
 
           if (sent?.message_id) {
             connectionStatus.qrMessageId = sent.message_id;
@@ -642,6 +654,7 @@ export async function initWhatsApp({
       }
 
       if (connection === 'open') {
+        reconnectAttempts = 0;
         connectionStatus.connected = true;
         connectionStatus.userJid = sock.user.id;
         latestQrString = null;
@@ -690,50 +703,66 @@ export async function initWhatsApp({
         }, 4000);
       }
 
-    if (connection === 'close') {
-      connectionStatus.connected = false;
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const isReplaced = statusCode === DisconnectReason.connectionReplaced;
-      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      if (connection === 'close') {
+        connectionStatus.connected = false;
+        latestQrString = null;
+        latestQrBuffer = null;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const isReplaced = statusCode === DisconnectReason.connectionReplaced;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-      console.log(`🔴 WhatsApp disconnected. Reason code: ${statusCode}. Replaced: ${isReplaced}. LoggedOut: ${isLoggedOut}`);
+        console.log(`🔴 WhatsApp disconnected. Reason code: ${statusCode}. Replaced: ${isReplaced}. LoggedOut: ${isLoggedOut}`);
 
-      // If connection was replaced by a newer session, do NOT reconnect in loop
-      if (isReplaced) {
-        console.log('⚠️ Connection replaced by another session. Halting old socket.');
-        return;
-      }
+        if (sock._isClosing) {
+          return;
+        }
 
-      if (isLoggedOut) {
-        console.log('🔴 WhatsApp session logged out / expired. Generating fresh QR code...');
-        hasAnnouncedConnected = false;
-        try {
-          await client.execute({
-            sql: 'DELETE FROM wa_auth_sessions WHERE session_id = ?',
-            args: [sessionId]
-          });
-        } catch (_) {}
+        // If connection was replaced by a newer session, do NOT reconnect in loop
+        if (isReplaced) {
+          console.log('⚠️ Connection replaced by another session. Halting old socket.');
+          return;
+        }
 
-        await bot.telegram.sendMessage(
-          groupId,
-          '⚠️ <b>WhatsApp Logged Out:</b> Generating a fresh QR code with <b>Full History Sync enabled</b>...',
-          getTopicExtra(generalTopicId, {
-            parse_mode: 'HTML'
-          })
-        ).catch(() => {});
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
 
-        setTimeout(() => {
+        if (isLoggedOut) {
+          console.log('🔴 WhatsApp session logged out / expired. Generating fresh QR code...');
+          hasAnnouncedConnected = false;
+          try {
+            await client.execute({
+              sql: 'DELETE FROM wa_auth_sessions WHERE session_id = ?',
+              args: [sessionId]
+            });
+          } catch (_) {}
+
+          await bot.telegram.sendMessage(
+            groupId,
+            '⚠️ <b>WhatsApp Logged Out:</b> Generating a fresh QR code...',
+            getTopicExtra(generalTopicId, {
+              parse_mode: 'HTML'
+            })
+          ).catch(() => {});
+
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            initWhatsApp({ client, sessionId, bot, groupId, generalTopicId });
+          }, 3000);
+          return;
+        }
+
+        // Standard network reconnect with exponential backoff
+        reconnectAttempts++;
+        const delay = Math.min(3000 * Math.pow(1.5, reconnectAttempts - 1), 15000);
+        console.log(`🔄 Attempting WhatsApp reconnection in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts})...`);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
           initWhatsApp({ client, sessionId, bot, groupId, generalTopicId });
-        }, 3000);
-        return;
+        }, delay);
       }
-
-      // Standard network reconnect
-      setTimeout(() => {
-        console.log('🔄 Attempting WhatsApp reconnection...');
-        initWhatsApp({ client, sessionId, bot, groupId, generalTopicId });
-      }, 5000);
-    }
+    });
   });
 
   // ================= 1. SYNC CONTACTS & PHONE NUMBER SHARES ================= //
@@ -1742,19 +1771,30 @@ function escapeHtml(text) {
 
 export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bot, groupId, generalTopicId = 1 }) {
   const now = Date.now();
-  if (isRelinkingWa || (now - lastRelinkTime < 10000)) {
-    console.log('⚠️ Relink is already in progress or recently executed, skipping duplicate.');
+  if (isRelinkingWa || (now - lastRelinkTime < 8000)) {
+    console.log('⚠️ Relink is already in progress, skipping duplicate call.');
     return;
   }
   isRelinkingWa = true;
   lastRelinkTime = now;
 
-  console.log('🔄 Resetting WhatsApp session for clean relink & pairing...');
-  hasAnnouncedConnected = false;
-  connectionStatus.connected = false;
-  connectionStatus.userJid = null;
-  latestQrString = null;
-  latestQrBuffer = null;
+  console.log('🔄 Performing 100% full reset: deleting contacts, forum topics, and sessions...');
+
+  // 1. Cancel any pending reconnect timer
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  // 2. Terminate existing socket cleanly
+  if (sockInstance) {
+    try {
+      sockInstance._isClosing = true;
+      sockInstance.ev.removeAllListeners();
+      sockInstance.end();
+    } catch (_) {}
+    sockInstance = null;
+  }
 
   if (activeAuthCleanup) {
     try {
@@ -1763,29 +1803,57 @@ export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bo
     activeAuthCleanup = null;
   }
 
-  if (sockInstance) {
-    try {
-      sockInstance.ev.removeAllListeners();
-      sockInstance.end();
-    } catch (_) {}
-    sockInstance = null;
+  hasAnnouncedConnected = false;
+  connectionStatus.connected = false;
+  connectionStatus.userJid = null;
+  latestQrString = null;
+  latestQrBuffer = null;
+  storageTopicId = null;
+  reconnectAttempts = 0;
+
+  // 3. Delete all Telegram Forum Topics (except General Topic 1)
+  try {
+    const allMappings = await getAllMappings();
+    console.log(`🧹 Deleting ${allMappings.length} existing Telegram forum topics...`);
+    for (const m of allMappings) {
+      const tid = Number(m.tg_topic_id);
+      if (tid && tid > 1) {
+        try {
+          await bot.telegram.deleteForumTopic(groupId, tid);
+          await new Promise(r => setTimeout(r, 250)); // Respect Telegram rate limits
+        } catch (err) {
+          console.warn(`Could not delete topic ${tid}:`, err.message);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Error deleting existing Telegram topics:', err.message);
   }
 
+  // 4. Wipe all database tables clean
   try {
     await client.execute({
       sql: 'DELETE FROM wa_auth_sessions WHERE session_id = ?',
       args: [sessionId]
     });
+    await client.execute('DELETE FROM chat_mappings');
+    await client.execute('DELETE FROM contacts');
     await client.execute('DELETE FROM message_history');
+    console.log('✅ Database tables wiped completely clean.');
   } catch (err) {
     console.warn('Error clearing Turso tables on relink:', err.message);
   }
 
+  // 5. Notify user in Telegram General Topic
   try {
     await retryTelegramCall(async () => {
       await bot.telegram.sendMessage(
         groupId,
-        '🔄 <b>Generating New WhatsApp QR Code:</b>\nPlease wait a moment for the new pairing QR code to appear below.\nOnce it appears, scan in <b>WhatsApp > Linked Devices</b>.',
+        '🔄 <b>Full Reset & Fresh Relink:</b>\n\n' +
+        '• All contacts and forum topics have been wiped clean.\n' +
+        '• Generating a fresh pairing QR code below.\n\n' +
+        '📱 Scan the QR code in <b>WhatsApp > Linked Devices</b> to link fresh.\n' +
+        '🌐 <b>Live Web View:</b> https://kezzy.onrender.com/qr',
         getTopicExtra(generalTopicId, { parse_mode: 'HTML' })
       );
     }, 2, 800);
@@ -1793,8 +1861,9 @@ export async function relinkWhatsApp({ client, sessionId = 'main_wa_session', bo
     console.warn('Could not send relink status notice to Telegram:', err.message);
   }
 
+  // 6. Launch completely fresh WhatsApp connection
   setTimeout(() => {
     isRelinkingWa = false;
     initWhatsApp({ client, sessionId, bot, groupId, generalTopicId });
-  }, 1000);
+  }, 1500);
 }
