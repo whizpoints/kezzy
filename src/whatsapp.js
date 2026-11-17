@@ -1447,7 +1447,15 @@ export async function initWhatsApp({
                     parse_mode: 'HTML',
                     reply_markup: replyMarkup
                   })
-                );
+                ).catch(async () => {
+                  return await uploadTelegramMedia('sendVoice', {
+                    chatId: groupId,
+                    topicId,
+                    caption: prefix.trim(),
+                    parseMode: 'HTML',
+                    replyMarkup
+                  }, buffer, 'voice.ogg', 'voice').catch(() => null);
+                });
               } else {
                 sentTgMsg = await sendWithRetry(() =>
                   bot.telegram.sendAudio(groupId, { source: buffer, filename: 'audio.mp3' }, {
@@ -1456,7 +1464,15 @@ export async function initWhatsApp({
                     parse_mode: 'HTML',
                     reply_markup: replyMarkup
                   })
-                );
+                ).catch(async () => {
+                  return await uploadTelegramMedia('sendAudio', {
+                    chatId: groupId,
+                    topicId,
+                    caption: prefix.trim(),
+                    parseMode: 'HTML',
+                    replyMarkup
+                  }, buffer, 'audio.mp3', 'audio').catch(() => null);
+                });
               }
 
               // Mirror audio to dedicated Storage Vault
@@ -1495,7 +1511,15 @@ export async function initWhatsApp({
                   parse_mode: 'HTML',
                   reply_markup: replyMarkup
                 })
-              );
+              ).catch(async () => {
+                return await uploadTelegramMedia('sendVideo', {
+                  chatId: groupId,
+                  topicId,
+                  caption,
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, 'video.mp4', 'video').catch(() => null);
+              });
 
               // Mirror video to dedicated Storage Vault
               await mirrorMediaToStorage(bot, groupId, {
@@ -1932,7 +1956,15 @@ export async function initWhatsApp({
                     reply_markup: replyMarkup
                   }
                 )
-              );
+              ).catch(async () => {
+                return await uploadTelegramMedia('sendVoice', {
+                  chatId: groupId,
+                  topicId,
+                  caption: prefix ? prefix.trim() : undefined,
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, 'voice.ogg', 'voice').catch(() => null);
+              });
             } else {
               sentTgMsg = await sendWithTopicRecovery((tid) =>
                 bot.telegram.sendAudio(
@@ -1945,7 +1977,15 @@ export async function initWhatsApp({
                     reply_markup: replyMarkup
                   }
                 )
-              );
+              ).catch(async () => {
+                return await uploadTelegramMedia('sendAudio', {
+                  chatId: groupId,
+                  topicId,
+                  caption: prefix ? prefix.trim() : undefined,
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, 'audio.mp3', 'audio').catch(() => null);
+              });
             }
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: isVoice ? 'voice' : 'audio',
@@ -1988,7 +2028,15 @@ export async function initWhatsApp({
                   reply_markup: replyMarkup
                 }
               )
-            );
+            ).catch(async () => {
+              return await uploadTelegramMedia('sendVideo', {
+                chatId: groupId,
+                topicId,
+                caption: `${prefix}${escapeHtml(bodyText)}`,
+                parseMode: 'HTML',
+                replyMarkup
+              }, buffer, 'video.mp4', 'video').catch(() => null);
+            });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'video',
               buffer,
