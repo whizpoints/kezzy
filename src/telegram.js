@@ -788,10 +788,23 @@ export function initTelegramBot({ botToken, groupId, generalTopicId = 1, getWaSo
 
     if (!mapping.is_group) {
       if (targetJid.endsWith('@lid')) {
-        // Chat was initiated with an LID; fallback to phone JID if LID fails
+        // Chat was mapped with an LID (e.g. from group participant); resolve real phone number for proper Signal E2EE
         const contact = await getContact(targetJid);
-        if (contact?.phone_number) {
-          fallbackJid = `${contact.phone_number}@s.whatsapp.net`;
+        let phone = contact?.phone_number;
+        if (!phone && mapping.chat_name) {
+          const match = mapping.chat_name.match(/\+(\d{7,15})/);
+          if (match) phone = match[1];
+        }
+        if (phone) {
+          fallbackJid = targetJid; // Keep LID as fallback
+          targetJid = `${phone}@s.whatsapp.net`; // Always prefer real phone JID for Signal E2EE!
+          // Upgrade mapping wa_id to phone JID so all future lookups are direct
+          await saveMapping({
+            waId: targetJid,
+            topicId,
+            chatName: mapping.chat_name,
+            isGroup: false
+          }).catch(() => {});
         }
       } else if (targetJid.endsWith('@s.whatsapp.net')) {
         // Chat was initiated with phone JID; fallback to LID if known and phone fails

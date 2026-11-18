@@ -24,7 +24,8 @@ import {
   updateMappingName,
   getContactsWithPhone,
   updateContactLid,
-  seedContactsFromFile
+  seedContactsFromFile,
+  hasProfileCardBeenPinned
 } from './db.js';
 import { sanitizeTopicName, downloadWaMedia, getProfilePictureBuffer, unwrapWaMessage, parseVCard } from './media.js';
 
@@ -59,6 +60,7 @@ export function getLatestQr() {
 const msgRetryCounterCache = new NodeCache();
 export const rawMessageCache = new NodeCache({ stdTTL: 86400, maxKeys: 5000 });
 export const botSentMessageIds = new Set();
+export const processedUpsertMessageIds = new Set();
 
 /**
  * Record message sent from Telegram to prevent echo and allow retry re-encryption
@@ -295,12 +297,30 @@ export async function resyncContactsAndAppState(sock) {
   }
 }
 
+// In-memory set to prevent duplicate profile cards during active runtime
+const pinnedCardTopics = new Set();
+
 /**
  * Generate and pin profile picture card at the top of a topic
  */
 export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId, chatName) {
   if (!bot || !groupId || !topicId || !waId) return;
   if (waId === '__storage_media__' || waId === '0@s.whatsapp.net') return;
+
+  // 1. In-memory deduplication check
+  if (pinnedCardTopics.has(topicId)) return;
+
+  // 2. Persistent DB deduplication check
+  try {
+    const alreadyPinned = await hasProfileCardBeenPinned(topicId);
+    if (alreadyPinned) {
+      pinnedCardTopics.add(topicId);
+      return;
+    }
+  } catch (_) {}
+
+  // Reserve immediately in RAM to prevent race condition with parallel sync workers
+  pinnedCardTopics.add(topicId);
 
   try {
     if (waId.endsWith('@g.us')) {
@@ -311,28 +331,39 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
           `💬 <b>WhatsApp Group</b>\n\n` +
           `📌 <i>Pinned Group Info</i>`;
 
-        let card = await retryTelegramCall(() =>
-          bot.telegram.sendPhoto(
-            groupId,
-            { source: buffer, filename: 'group.jpg' },
-            {
-              message_thread_id: topicId,
-              caption,
-              parse_mode: 'HTML'
-            }
-          ), 2, 800
-        ).catch(async () => {
-          return await uploadTelegramMedia('sendPhoto', {
-            chatId: groupId,
-            topicId,
-            caption,
-            parseMode: 'HTML'
-          }, buffer, 'group.jpg', 'photo').catch(() => null);
+        let card = await uploadTelegramMedia('sendPhoto', {
+          chatId: groupId,
+          topicId,
+          caption,
+          parseMode: 'HTML'
+        }, buffer, 'group.jpg', 'photo').catch(async () => {
+          return await retryTelegramCall(() =>
+            bot.telegram.sendPhoto(
+              groupId,
+              { source: buffer, filename: 'group.jpg' },
+              {
+                message_thread_id: topicId,
+                caption,
+                parse_mode: 'HTML'
+              }
+            ), 2, 800
+          ).catch(() => null);
         });
 
         if (card) {
           await bot.telegram.pinChatMessage(groupId, card.message_id, {
             disable_notification: true
+          }).catch(() => {});
+
+          await saveMessageHistory({
+            waMessageId: `pinned_group_${topicId}`,
+            tgMessageId: card.message_id,
+            waChatId: waId,
+            tgTopicId: topicId,
+            senderWaId: 'me',
+            contentText: caption,
+            mediaType: 'profile_card',
+            rawMessage: null
           }).catch(() => {});
         }
       }
@@ -352,28 +383,39 @@ export async function ensurePinnedProfileCard(sock, bot, groupId, topicId, waId,
       `💬 <b>WhatsApp Direct Chat</b>\n\n` +
       `📌 <i>Pinned Profile Card</i>`;
 
-    let card = await retryTelegramCall(() =>
-      bot.telegram.sendPhoto(
-        groupId,
-        { source: buffer, filename: 'profile.jpg' },
-        {
-          message_thread_id: topicId,
-          caption,
-          parse_mode: 'HTML'
-        }
-      ), 2, 800
-    ).catch(async () => {
-      return await uploadTelegramMedia('sendPhoto', {
-        chatId: groupId,
-        topicId,
-        caption,
-        parseMode: 'HTML'
-      }, buffer, 'profile.jpg', 'photo').catch(() => null);
+    let card = await uploadTelegramMedia('sendPhoto', {
+      chatId: groupId,
+      topicId,
+      caption,
+      parseMode: 'HTML'
+    }, buffer, 'profile.jpg', 'photo').catch(async () => {
+      return await retryTelegramCall(() =>
+        bot.telegram.sendPhoto(
+          groupId,
+          { source: buffer, filename: 'profile.jpg' },
+          {
+            message_thread_id: topicId,
+            caption,
+            parse_mode: 'HTML'
+          }
+        ), 2, 800
+      ).catch(() => null);
     });
 
     if (card) {
       await bot.telegram.pinChatMessage(groupId, card.message_id, {
         disable_notification: true
+      }).catch(() => {});
+
+      await saveMessageHistory({
+        waMessageId: `pinned_card_${topicId}`,
+        tgMessageId: card.message_id,
+        waChatId: waId,
+        tgTopicId: topicId,
+        senderWaId: 'me',
+        contentText: caption,
+        mediaType: 'profile_card',
+        rawMessage: null
       }).catch(() => {});
     }
   } catch (err) {
@@ -1337,21 +1379,21 @@ export async function initWhatsApp({
             const buffer = await downloadWaMedia(m, sock);
             const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'image', groupId, storageTopicId);
             if (buffer) {
-              sentTgMsg = await sendWithRetry(() =>
-                bot.telegram.sendPhoto(groupId, { source: buffer, filename: 'photo.jpg' }, {
-                  message_thread_id: topicId,
-                  caption,
-                  parse_mode: 'HTML',
-                  reply_markup: replyMarkup
-                })
-              ).catch(async () => {
-                return await uploadTelegramMedia('sendPhoto', {
-                  chatId: groupId,
-                  topicId,
-                  caption,
-                  parseMode: 'HTML',
-                  replyMarkup
-                }, buffer, 'photo.jpg', 'photo').catch(() => null);
+              sentTgMsg = await uploadTelegramMedia('sendPhoto', {
+                chatId: groupId,
+                topicId,
+                caption,
+                parseMode: 'HTML',
+                replyMarkup
+              }, buffer, 'photo.jpg', 'photo').catch(async () => {
+                return await sendWithRetry(() =>
+                  bot.telegram.sendPhoto(groupId, { source: buffer, filename: 'photo.jpg' }, {
+                    message_thread_id: topicId,
+                    caption,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  })
+                );
               });
 
               // Mirror photo to dedicated Storage Vault
@@ -1385,21 +1427,21 @@ export async function initWhatsApp({
             const buffer = await downloadWaMedia(m, sock);
             const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'document', groupId, storageTopicId);
             if (buffer) {
-              sentTgMsg = await sendWithRetry(() =>
-                bot.telegram.sendDocument(groupId, { source: buffer, filename: fileName }, {
-                  message_thread_id: topicId,
-                  caption,
-                  parse_mode: 'HTML',
-                  reply_markup: replyMarkup
-                })
-              ).catch(async () => {
-                return await uploadTelegramMedia('sendDocument', {
-                  chatId: groupId,
-                  topicId,
-                  caption,
-                  parseMode: 'HTML',
-                  replyMarkup
-                }, buffer, fileName, 'document').catch(() => null);
+              sentTgMsg = await uploadTelegramMedia('sendDocument', {
+                chatId: groupId,
+                topicId,
+                caption,
+                parseMode: 'HTML',
+                replyMarkup
+              }, buffer, fileName, 'document').catch(async () => {
+                return await sendWithRetry(() =>
+                  bot.telegram.sendDocument(groupId, { source: buffer, filename: fileName }, {
+                    message_thread_id: topicId,
+                    caption,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  })
+                );
               });
 
               // Mirror document to dedicated Storage Vault
@@ -1431,38 +1473,38 @@ export async function initWhatsApp({
             const replyMarkup = makeReplyMarkup(m.key, isFromMe, mediaType, groupId, storageTopicId);
             if (buffer) {
               if (isVoice) {
-                sentTgMsg = await sendWithRetry(() =>
-                  bot.telegram.sendVoice(groupId, { source: buffer }, {
-                    message_thread_id: topicId,
-                    caption: prefix.trim(),
-                    parse_mode: 'HTML',
-                    reply_markup: replyMarkup
-                  })
-                ).catch(async () => {
-                  return await uploadTelegramMedia('sendVoice', {
-                    chatId: groupId,
-                    topicId,
-                    caption: prefix.trim(),
-                    parseMode: 'HTML',
-                    replyMarkup
-                  }, buffer, 'voice.ogg', 'voice').catch(() => null);
+                sentTgMsg = await uploadTelegramMedia('sendVoice', {
+                  chatId: groupId,
+                  topicId,
+                  caption: prefix.trim(),
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, 'voice.ogg', 'voice').catch(async () => {
+                  return await sendWithRetry(() =>
+                    bot.telegram.sendVoice(groupId, { source: buffer }, {
+                      message_thread_id: topicId,
+                      caption: prefix.trim(),
+                      parse_mode: 'HTML',
+                      reply_markup: replyMarkup
+                    })
+                  );
                 });
               } else {
-                sentTgMsg = await sendWithRetry(() =>
-                  bot.telegram.sendAudio(groupId, { source: buffer, filename: 'audio.mp3' }, {
-                    message_thread_id: topicId,
-                    caption: prefix.trim(),
-                    parse_mode: 'HTML',
-                    reply_markup: replyMarkup
-                  })
-                ).catch(async () => {
-                  return await uploadTelegramMedia('sendAudio', {
-                    chatId: groupId,
-                    topicId,
-                    caption: prefix.trim(),
-                    parseMode: 'HTML',
-                    replyMarkup
-                  }, buffer, 'audio.mp3', 'audio').catch(() => null);
+                sentTgMsg = await uploadTelegramMedia('sendAudio', {
+                  chatId: groupId,
+                  topicId,
+                  caption: prefix.trim(),
+                  parseMode: 'HTML',
+                  replyMarkup
+                }, buffer, 'audio.mp3', 'audio').catch(async () => {
+                  return await sendWithRetry(() =>
+                    bot.telegram.sendAudio(groupId, { source: buffer, filename: 'audio.mp3' }, {
+                      message_thread_id: topicId,
+                      caption: prefix.trim(),
+                      parse_mode: 'HTML',
+                      reply_markup: replyMarkup
+                    })
+                  );
                 });
               }
 
@@ -1495,21 +1537,21 @@ export async function initWhatsApp({
             const buffer = await downloadWaMedia(m, sock);
             const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'video', groupId, storageTopicId);
             if (buffer) {
-              sentTgMsg = await sendWithRetry(() =>
-                bot.telegram.sendVideo(groupId, { source: buffer, filename: 'video.mp4' }, {
-                  message_thread_id: topicId,
-                  caption,
-                  parse_mode: 'HTML',
-                  reply_markup: replyMarkup
-                })
-              ).catch(async () => {
-                return await uploadTelegramMedia('sendVideo', {
-                  chatId: groupId,
-                  topicId,
-                  caption,
-                  parseMode: 'HTML',
-                  replyMarkup
-                }, buffer, 'video.mp4', 'video').catch(() => null);
+              sentTgMsg = await uploadTelegramMedia('sendVideo', {
+                chatId: groupId,
+                topicId,
+                caption,
+                parseMode: 'HTML',
+                replyMarkup
+              }, buffer, 'video.mp4', 'video').catch(async () => {
+                return await sendWithRetry(() =>
+                  bot.telegram.sendVideo(groupId, { source: buffer, filename: 'video.mp4' }, {
+                    message_thread_id: topicId,
+                    caption,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  })
+                );
               });
 
               // Mirror video to dedicated Storage Vault
@@ -1622,6 +1664,24 @@ export async function initWhatsApp({
       if (isFromMe && botSentMessageIds.has(m.key.id)) {
         botSentMessageIds.delete(m.key.id);
         continue;
+      }
+
+      // 1. RAM deduplication check
+      if (processedUpsertMessageIds.has(m.key.id)) {
+        continue;
+      }
+
+      // 2. Persistent DB deduplication check (prevents duplicate delivery if already processed in history sync or earlier session)
+      const existingHistory = await getMessageHistoryByWaId(m.key.id);
+      if (existingHistory) {
+        processedUpsertMessageIds.add(m.key.id);
+        continue;
+      }
+
+      processedUpsertMessageIds.add(m.key.id);
+      if (processedUpsertMessageIds.size > 5000) {
+        const first = processedUpsertMessageIds.values().next().value;
+        processedUpsertMessageIds.delete(first);
       }
 
       const unwrapped = unwrapWaMessage(m.message);
@@ -1800,29 +1860,25 @@ export async function initWhatsApp({
           const buffer = await downloadWaMedia(m, sock);
           const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'image', groupId, storageTopicId);
           if (buffer) {
-            sentTgMsg = await sendWithTopicRecovery((tid) =>
-              bot.telegram.sendPhoto(
-                groupId,
-                { source: buffer, filename: 'photo.jpg' },
-                {
-                  message_thread_id: tid,
-                  caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parse_mode: 'HTML',
-                  reply_markup: replyMarkup
-                }
-              )
-            ).catch(async (photoErr) => {
-              console.warn('Telegraf sendPhoto note, attempting native multipart upload:', photoErr.message);
-              try {
-                return await uploadTelegramMedia('sendPhoto', {
-                  chatId: groupId,
-                  topicId,
-                  caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parseMode: 'HTML',
-                  replyMarkup
-                }, buffer, 'photo.jpg', 'photo');
-              } catch (nativeErr) {
-                console.warn('Native photo upload note, falling back to text:', nativeErr.message);
+            sentTgMsg = await uploadTelegramMedia('sendPhoto', {
+              chatId: groupId,
+              topicId,
+              caption: `${prefix}${escapeHtml(bodyText)}`,
+              parseMode: 'HTML',
+              replyMarkup
+            }, buffer, 'photo.jpg', 'photo').catch(async () => {
+              return await sendWithTopicRecovery((tid) =>
+                bot.telegram.sendPhoto(
+                  groupId,
+                  { source: buffer, filename: 'photo.jpg' },
+                  {
+                    message_thread_id: tid,
+                    caption: `${prefix}${escapeHtml(bodyText)}`,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  }
+                )
+              ).catch(async () => {
                 return await sendWithTopicRecovery((tid) =>
                   bot.telegram.sendMessage(
                     groupId,
@@ -1834,7 +1890,7 @@ export async function initWhatsApp({
                     }
                   )
                 );
-              }
+              });
             });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'image',
@@ -1869,29 +1925,25 @@ export async function initWhatsApp({
           const buffer = await downloadWaMedia(m, sock);
           const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'document', groupId, storageTopicId);
           if (buffer) {
-            sentTgMsg = await sendWithTopicRecovery((tid) =>
-              bot.telegram.sendDocument(
-                groupId,
-                { source: buffer, filename: fileName },
-                {
-                  message_thread_id: tid,
-                  caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parse_mode: 'HTML',
-                  reply_markup: replyMarkup
-                }
-              )
-            ).catch(async (docErr) => {
-              console.warn('Telegraf sendDocument note, attempting native multipart upload:', docErr.message);
-              try {
-                return await uploadTelegramMedia('sendDocument', {
-                  chatId: groupId,
-                  topicId,
-                  caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parseMode: 'HTML',
-                  replyMarkup
-                }, buffer, fileName, 'document');
-              } catch (nativeErr) {
-                console.warn('Native document upload note, falling back to text:', nativeErr.message);
+            sentTgMsg = await uploadTelegramMedia('sendDocument', {
+              chatId: groupId,
+              topicId,
+              caption: `${prefix}${escapeHtml(bodyText)}`,
+              parseMode: 'HTML',
+              replyMarkup
+            }, buffer, fileName, 'document').catch(async () => {
+              return await sendWithTopicRecovery((tid) =>
+                bot.telegram.sendDocument(
+                  groupId,
+                  { source: buffer, filename: fileName },
+                  {
+                    message_thread_id: tid,
+                    caption: `${prefix}${escapeHtml(bodyText)}`,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  }
+                )
+              ).catch(async () => {
                 return await sendWithTopicRecovery((tid) =>
                   bot.telegram.sendMessage(
                     groupId,
@@ -1903,7 +1955,7 @@ export async function initWhatsApp({
                     }
                   )
                 );
-              }
+              });
             });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'document',
@@ -1936,46 +1988,46 @@ export async function initWhatsApp({
           const replyMarkup = makeReplyMarkup(m.key, isFromMe, mediaType, groupId, storageTopicId);
           if (buffer) {
             if (isVoice) {
-              sentTgMsg = await sendWithTopicRecovery((tid) =>
-                bot.telegram.sendVoice(
-                  groupId,
-                  { source: buffer, filename: 'voice.ogg' },
-                  {
-                    message_thread_id: tid,
-                    caption: prefix ? prefix.trim() : undefined,
-                    parse_mode: 'HTML',
-                    reply_markup: replyMarkup
-                  }
-                )
-              ).catch(async () => {
-                return await uploadTelegramMedia('sendVoice', {
-                  chatId: groupId,
-                  topicId,
-                  caption: prefix ? prefix.trim() : undefined,
-                  parseMode: 'HTML',
-                  replyMarkup
-                }, buffer, 'voice.ogg', 'voice').catch(() => null);
+              sentTgMsg = await uploadTelegramMedia('sendVoice', {
+                chatId: groupId,
+                topicId,
+                caption: prefix ? prefix.trim() : undefined,
+                parseMode: 'HTML',
+                replyMarkup
+              }, buffer, 'voice.ogg', 'voice').catch(async () => {
+                return await sendWithTopicRecovery((tid) =>
+                  bot.telegram.sendVoice(
+                    groupId,
+                    { source: buffer, filename: 'voice.ogg' },
+                    {
+                      message_thread_id: tid,
+                      caption: prefix ? prefix.trim() : undefined,
+                      parse_mode: 'HTML',
+                      reply_markup: replyMarkup
+                    }
+                  )
+                );
               });
             } else {
-              sentTgMsg = await sendWithTopicRecovery((tid) =>
-                bot.telegram.sendAudio(
-                  groupId,
-                  { source: buffer, filename: 'audio.mp3' },
-                  {
-                    message_thread_id: tid,
-                    caption: prefix ? prefix.trim() : undefined,
-                    parse_mode: 'HTML',
-                    reply_markup: replyMarkup
-                  }
-                )
-              ).catch(async () => {
-                return await uploadTelegramMedia('sendAudio', {
-                  chatId: groupId,
-                  topicId,
-                  caption: prefix ? prefix.trim() : undefined,
-                  parseMode: 'HTML',
-                  replyMarkup
-                }, buffer, 'audio.mp3', 'audio').catch(() => null);
+              sentTgMsg = await uploadTelegramMedia('sendAudio', {
+                chatId: groupId,
+                topicId,
+                caption: prefix ? prefix.trim() : undefined,
+                parseMode: 'HTML',
+                replyMarkup
+              }, buffer, 'audio.mp3', 'audio').catch(async () => {
+                return await sendWithTopicRecovery((tid) =>
+                  bot.telegram.sendAudio(
+                    groupId,
+                    { source: buffer, filename: 'audio.mp3' },
+                    {
+                      message_thread_id: tid,
+                      caption: prefix ? prefix.trim() : undefined,
+                      parse_mode: 'HTML',
+                      reply_markup: replyMarkup
+                    }
+                  )
+                );
               });
             }
             await mirrorMediaToStorage(bot, groupId, {
@@ -2008,25 +2060,25 @@ export async function initWhatsApp({
           const buffer = await downloadWaMedia(m, sock);
           const replyMarkup = makeReplyMarkup(m.key, isFromMe, 'video', groupId, storageTopicId);
           if (buffer) {
-            sentTgMsg = await sendWithTopicRecovery((tid) =>
-              bot.telegram.sendVideo(
-                groupId,
-                { source: buffer, filename: 'video.mp4' },
-                {
-                  message_thread_id: tid,
-                  caption: `${prefix}${escapeHtml(bodyText)}`,
-                  parse_mode: 'HTML',
-                  reply_markup: replyMarkup
-                }
-              )
-            ).catch(async () => {
-              return await uploadTelegramMedia('sendVideo', {
-                chatId: groupId,
-                topicId,
-                caption: `${prefix}${escapeHtml(bodyText)}`,
-                parseMode: 'HTML',
-                replyMarkup
-              }, buffer, 'video.mp4', 'video').catch(() => null);
+            sentTgMsg = await uploadTelegramMedia('sendVideo', {
+              chatId: groupId,
+              topicId,
+              caption: `${prefix}${escapeHtml(bodyText)}`,
+              parseMode: 'HTML',
+              replyMarkup
+            }, buffer, 'video.mp4', 'video').catch(async () => {
+              return await sendWithTopicRecovery((tid) =>
+                bot.telegram.sendVideo(
+                  groupId,
+                  { source: buffer, filename: 'video.mp4' },
+                  {
+                    message_thread_id: tid,
+                    caption: `${prefix}${escapeHtml(bodyText)}`,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                  }
+                )
+              );
             });
             await mirrorMediaToStorage(bot, groupId, {
               mediaType: 'video',

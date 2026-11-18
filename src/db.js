@@ -200,6 +200,19 @@ export async function getMessageHistoryByWaId(waMessageId) {
   return res.rows[0] || null;
 }
 
+export async function hasProfileCardBeenPinned(topicId) {
+  if (!topicId) return false;
+  try {
+    const res = await client.execute({
+      sql: "SELECT 1 FROM message_history WHERE tg_topic_id = ? AND media_type = 'profile_card' LIMIT 1",
+      args: [topicId]
+    });
+    return res.rows.length > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
 // ================= Contacts ================= //
 
 export async function saveContact({ waId, name, phoneNumber = null, lid = null }) {
