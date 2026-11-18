@@ -3,6 +3,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   Browsers,
   makeCacheableSignalKeyStore,
+  DEFAULT_CONNECTION_CONFIG,
   BufferJSON,
   proto
 } from '@whiskeysockets/baileys';
@@ -881,6 +882,35 @@ export async function initWhatsApp({
       logger: pino({ level: 'silent' }),
       browser: Browsers.ubuntu('Chrome'),
       msgRetryCounterCache,
+      makeSignalRepository: (auth) => {
+        const repo = DEFAULT_CONNECTION_CONFIG.makeSignalRepository(auth);
+        const originalDecryptMessage = repo.decryptMessage.bind(repo);
+
+        repo.decryptMessage = async ({ jid, type, ciphertext }) => {
+          try {
+            return await originalDecryptMessage({ jid, type, ciphertext });
+          } catch (err) {
+            const isBadMacOrSessionErr =
+              err?.message?.includes('Bad MAC') ||
+              err?.message?.includes('No matching sessions') ||
+              err?.name === 'SessionError';
+
+            if (isBadMacOrSessionErr) {
+              const addr = repo.jidToSignalProtocolAddress(jid);
+              const sessionKey = typeof addr === 'string' ? addr : addr.toString();
+              console.warn(`🛡️ Signal session decryption failure for ${sessionKey} (${err.message}). Auto-clearing corrupted session to trigger clean re-keying...`);
+              try {
+                await auth.keys.set({ session: { [sessionKey]: null } });
+              } catch (clearErr) {
+                console.warn(`Could not clear corrupted session ${sessionKey}:`, clearErr.message);
+              }
+            }
+            throw err;
+          }
+        };
+
+        return repo;
+      },
       getMessage: async (key) => {
         if (!key || !key.id) return undefined;
 

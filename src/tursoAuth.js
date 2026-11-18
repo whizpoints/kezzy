@@ -58,7 +58,6 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
 
         for (const keyId of batchKeys) {
           const val = pendingKeyWrites.get(keyId);
-          pendingKeyWrites.delete(keyId);
 
           if (val) {
             statements.push({
@@ -78,6 +77,11 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
 
         if (statements.length > 0) {
           await client.batch(statements, 'write');
+        }
+
+        // Successfully written; remove flushed keys from pending queue
+        for (const keyId of batchKeys) {
+          pendingKeyWrites.delete(keyId);
         }
       }
     } catch (err) {
@@ -107,10 +111,15 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
             const cacheKey = `${type}-${id}`;
             if (memoryCache.has(cacheKey)) {
               let val = memoryCache.get(cacheKey);
-              if (type === 'app-state-sync-key' && val) {
-                val = proto.Message.AppStateSyncKeyData.fromObject(val);
+              if (val !== null && val !== undefined) {
+                if (type === 'app-state-sync-key' && val) {
+                  val = proto.Message.AppStateSyncKeyData.fromObject(val);
+                }
+                data[id] = val;
               }
-              data[id] = val;
+            } else if (pendingKeyWrites.has(cacheKey) && pendingKeyWrites.get(cacheKey) === null) {
+              // Tombstoned for deletion in pending writes, don't resurrect from DB
+              memoryCache.set(cacheKey, null);
             } else {
               missingIds.push(id);
             }
@@ -127,7 +136,9 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
                 args: [sessionId, ...keyIds]
               });
 
+              const foundKeys = new Set();
               for (const row of res.rows) {
+                foundKeys.add(row.key_id);
                 const rawId = row.key_id.substring(type.length + 1);
                 let parsed = JSON.parse(row.value, BufferJSON.reviver);
                 if (type === 'app-state-sync-key' && parsed) {
@@ -135,6 +146,14 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
                 }
                 memoryCache.set(row.key_id, parsed);
                 data[rawId] = parsed;
+              }
+
+              // Cache negative lookups so missing keys don't trigger repeated DB queries
+              for (const id of missingIds) {
+                const kId = `${type}-${id}`;
+                if (!foundKeys.has(kId)) {
+                  memoryCache.set(kId, null);
+                }
               }
             } catch (err) {
               console.warn(`Failed to fetch keys ${type} from Turso:`, err.message);
@@ -156,7 +175,8 @@ export async function useTursoAuthState(client, sessionId = 'main_wa_session') {
                 const serialized = JSON.stringify(value, BufferJSON.replacer);
                 pendingKeyWrites.set(keyId, serialized);
               } else {
-                memoryCache.delete(keyId);
+                // Tombstone in RAM cache so get() does not resurrect from DB before flush
+                memoryCache.set(keyId, null);
                 pendingKeyWrites.set(keyId, null);
               }
             }
